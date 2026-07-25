@@ -1,5 +1,13 @@
 const { Client, GatewayIntentBits, PermissionFlagsBits } = require('discord.js');
+const http = require('http');
 
+// --- PETIT SERVEUR WEB POUR GARDER RENDER GRATUIT ---
+http.createServer((req, res) => {
+    res.write("Bot de securite en ligne !");
+    res.end();
+}).listen(process.env.PORT || 3000);
+
+// --- CONFIGURATION DU BOT DISCORD ---
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -9,7 +17,6 @@ const client = new Client({
     ]
 });
 
-// Le token sera récupéré de manière sécurisée depuis Render
 const TOKEN = process.env.DISCORD_TOKEN;
 
 client.on('ready', () => {
@@ -19,7 +26,7 @@ client.on('ready', () => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // --- 1. ANTI-INVITE / ANTI-LINK DISCORD ---
+    // 1. Anti-Invite
     const discordInviteRegex = /(discord\.(gg|me|com)|discordapp\.com\/invite)\/[a-zA-Z0-9]+/i;
     if (discordInviteRegex.test(message.content)) {
         if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
@@ -28,13 +35,13 @@ client.on('messageCreate', async (message) => {
         }
     }
 
-    // --- 2. ANTI-SPAM EVERYONE ---
+    // 2. Anti-Spam @everyone
     if (message.mentions.everyone && !message.member.permissions.has(PermissionFlagsBits.MentionEveryone)) {
         await message.delete().catch(() => {});
         return message.channel.send(`🚨 ${message.author}, tentative de spam de mention détectée.`);
     }
 
-    // --- 3. COMMANDE DE VERROUILLAGE D'URGENCE (!lockdown) ---
+    // 3. Commande !lockdown
     if (message.content.startsWith('!lockdown')) {
         if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
             return message.reply("❌ Tu n'as pas la permission d'utiliser cette commande d'urgence.");
