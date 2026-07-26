@@ -1,27 +1,36 @@
 // ============================================================================
-// 🛡️ n0mit Safeguard - Système de Sécurité Écosystème n0mit CoreSystems
+// 🛡️ n0mit Safeguard v2.0 - Le Bot de Sécurité Ultime
+// Écosystème n0mit CoreSystems
 // ============================================================================
 
-const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType } = require('discord.js');
+const { 
+    Client, 
+    GatewayIntentBits, 
+    PermissionFlagsBits, 
+    ChannelType, 
+    EmbedBuilder, 
+    AuditLogEvent 
+} = require('discord.js');
 const http = require('http');
 
 // ============================================================================
 // 1. SERVEUR WEB KEEP-ALIVE (Render Free Tier)
 // ============================================================================
 http.createServer((req, res) => {
-    res.write("n0mit Safeguard Core System Online!");
+    res.write("n0mit Safeguard - Protection active 24/7");
     res.end();
 }).listen(process.env.PORT || 3000);
 
 // ============================================================================
-// 2. CONFIGURATION INITIALE & CONFIGURATION EN MÉMOIRE
+// 2. INITIALISATION & CONFIGURATION
 // ============================================================================
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildModeration
     ]
 });
 
@@ -29,31 +38,36 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const OWNER_ID = "1440037449546989701"; 
 const UNIFIED_CHANNEL_NAME = "📢｜n0mit-coresystems";
 
-// Configuration dynamique par serveur (Stockée en mémoire)
+// Stockage de la configuration par serveur
 const guildConfigs = new Map();
+
+// Mémoire pour l'Anti-Nuke Staff (Suivi des actions destructrices)
+// Structure: staffActionTracker.get(guildId_userId) = { channelDeletes: count, roleDeletes: count, timestamp: time }
+const staffActionTracker = new Map();
 
 function getConfig(guildId) {
     if (!guildConfigs.has(guildId)) {
         guildConfigs.set(guildId, {
-            antiInvite: true,      // Supprime les pubs
-            antiPhishing: true,    // Supprime les liens malveillants/scams
-            antiEveryone: true,    // Bloque le spam @everyone
-            antiGhostPing: true,   // Détecte les pings supprimés
-            antiRaid: false,       // Sécurité renforcée lors des arrivées
-            logChannelId: null     // Salon de logs de sécurité
+            antiInvite: true,
+            antiPhishing: true,
+            antiEveryone: true,
+            antiGhostPing: true,
+            antiNukeStaff: true, // Protection contre les admins malveillants
+            antiUnauthorizedBot: true, // Bloque l'ajout de bots tiers
+            logChannelId: null
         });
     }
     return guildConfigs.get(guildId);
 }
 
-// Helper pour envoyer les logs de sécurité silencieux
-async function sendSecurityLog(guild, content) {
+// Helper pour envoyer un Log Pro dans le salon dédié
+async function sendSecurityLog(guild, embed) {
     const cfg = getConfig(guild.id);
     if (!cfg.logChannelId) return;
     try {
         const logChannel = guild.channels.cache.get(cfg.logChannelId);
         if (logChannel) {
-            await logChannel.send(`🛡️ **[LOG SÉCURITÉ]** ${content}`);
+            await logChannel.send({ embeds: [embed] });
         }
     } catch (e) {
         console.error("Erreur d'envoi du log :", e);
@@ -61,20 +75,22 @@ async function sendSecurityLog(guild, content) {
 }
 
 // ============================================================================
-// 3. GESTION DU SALON UNIFIÉ (n0mit CoreSystems)
+// 3. GESTION ET DÉTECTION DU SALON UNIFIÉ (Évite les conflits avec SchoolBot)
 // ============================================================================
 async function getOrCreateCoreChannel(guild) {
     try {
+        // 1. Cherche si un salon correspondant existe déjà
         let channel = guild.channels.cache.find(ch => 
             ch.name.toLowerCase().includes("n0mit-coresystems") || 
             ch.name.toLowerCase().includes("n0mit-info")
         );
 
+        // 2. Si non trouvé, on le crée
         if (!channel) {
             channel = await guild.channels.create({
                 name: UNIFIED_CHANNEL_NAME,
                 type: ChannelType.GuildText,
-                topic: "Annonces et informations système officielles de n0mit CoreSystems.",
+                topic: "Centre de contrôle et annonces système de l'écosystème n0mit.",
                 permissionOverwrites: [
                     {
                         id: guild.roles.everyone.id,
@@ -90,13 +106,126 @@ async function getOrCreateCoreChannel(guild) {
         }
         return channel;
     } catch (error) {
-        console.error(`Erreur création salon unifié sur ${guild.name}:`, error);
+        console.error(`Impossible de créer/récupérer le salon sur ${guild.name}:`, error);
         return guild.systemChannel;
     }
 }
 
+// Détection à chaud : Si ton autre bot crée un salon plus tard via /setup
+client.on('channelCreate', async (channel) => {
+    if (!channel.guild) return;
+    if (channel.name.toLowerCase().includes("n0mit-coresystems")) {
+        console.log(`🔗 Salon n0mit détecté suite à une création externe sur ${channel.guild.name}`);
+        
+        const embed = new EmbedBuilder()
+            .setTitle("🛡️ Connecteur n0mit Safeguard Sync")
+            .setColor(0x2B2D31)
+            .setDescription("Liaison réussie entre **n0mit Safeguard** et le salon système créé par l'écosystème.")
+            .setTimestamp();
+
+        await channel.send({ embeds: [embed] }).catch(() => {});
+    }
+});
+
 // ============================================================================
-// 4. ÉVÉNEMENTS DU CLIENT (Ready, GuildCreate, MemberAdd, MessageDelete)
+// 4. PROTECTION ANTI-NUKE STAFF & BOTS NON-AUTORISÉS
+// ============================================================================
+
+// A. Interception des arrivées de bots suspects
+client.on('guildMemberAdd', async (member) => {
+    const cfg = getConfig(member.guild.id);
+
+    // Si c'un bot qui vient d'être ajouté
+    if (member.user.bot && cfg.antiUnauthorizedBot) {
+        try {
+            const fetchedLogs = await member.guild.fetchAuditLogs({
+                limit: 1,
+                type: AuditLogEvent.BotAdd,
+            });
+            const botLog = fetchedLogs.entries.first();
+
+            // Si on ne trouve pas l'auteur ou que ce n'est pas le propriétaire du serveur
+            if (botLog && botLog.executor.id !== member.guild.ownerId) {
+                await member.kick("Sécurité Safeguard : Ajout de bot non autorisé par le propriétaire.");
+                
+                const logEmbed = new EmbedBuilder()
+                    .setTitle("🚨 BOT NON AUTORISÉ EXPULSÉ")
+                    .setColor(0xED4245)
+                    .setDescription(`Le bot **${member.user.tag}** a été ajouté par <@${botLog.executor.id}> sans l'accord du Propriétaire. Il a été immédiatement expulsé.`)
+                    .setTimestamp();
+
+                await sendSecurityLog(member.guild, logEmbed);
+            }
+        } catch (e) {
+            console.error("Erreur protection Anti-Bot :", e);
+        }
+    }
+});
+
+// B. Interception des suppressions de salons (Anti-Nuke Admin)
+client.on('channelDelete', async (channel) => {
+    if (!channel.guild) return;
+    const cfg = getConfig(channel.guild.id);
+    if (!cfg.antiNukeStaff) return;
+
+    try {
+        const fetchedLogs = await channel.guild.fetchAuditLogs({
+            limit: 1,
+            type: AuditLogEvent.ChannelDelete,
+        });
+        const auditEntry = fetchedLogs.entries.first();
+        if (!auditEntry) return;
+
+        const executor = auditEntry.executor;
+        // On exempte le propriétaire et le bot lui-même
+        if (executor.id === channel.guild.ownerId || executor.id === client.user.id) return;
+
+        const key = `${channel.guild.id}_${executor.id}`;
+        const now = Date.now();
+        const userStats = staffActionTracker.get(key) || { count: 0, firstAction: now };
+
+        if (now - userStats.firstAction > 10000) { // Réinitialise tous les 10s
+            userStats.count = 1;
+            userStats.firstAction = now;
+        } else {
+            userStats.count++;
+        }
+
+        staffActionTracker.set(key, userStats);
+
+        // Seuil : Plus de 2 salons supprimés en 10s = SUSPECT DE RAID STAFF
+        if (userStats.count >= 2) {
+            const member = await channel.guild.members.fetch(executor.id);
+            if (member) {
+                // Neutralisation de l'administrateur malveillant (Destitution de ses rôles)
+                const dangerousRoles = member.roles.cache.filter(r => 
+                    r.permissions.has(PermissionFlagsBits.Administrator) || 
+                    r.permissions.has(PermissionFlagsBits.ManageChannels) ||
+                    r.permissions.has(PermissionFlagsBits.BanMembers)
+                );
+
+                await member.roles.remove(dangerousRoles, "Anti-Nuke Safeguard : Tentative de destruction du serveur.");
+
+                const nukeEmbed = new EmbedBuilder()
+                    .setTitle("💥 DÉTECTION TENTATIVE DE NUKE (STAFF)")
+                    .setColor(0xED4245)
+                    .setDescription(`🚨 **ALERTE MAXIMALE**\nL'administrateur/modérateur **${executor.tag}** (<@${executor.id}>) a supprimé plusieurs salons en quelques secondes.\n\n🔒 **Mesure d'urgence appliquée :** Ses privilèges administratifs lui ont été retirés immédiatement !`)
+                    .setTimestamp();
+
+                await sendSecurityLog(channel.guild, nukeEmbed);
+                
+                // Prévenir le propriétaire du serveur en privé
+                const owner = await channel.guild.fetchOwner();
+                await owner.send({ embeds: [nukeEmbed] }).catch(() => {});
+            }
+        }
+    } catch (e) {
+        console.error("Erreur protection Anti-Nuke :", e);
+    }
+});
+
+// ============================================================================
+// 5. ARRIVÉE DU BOT SUR UN SERVEUR ET READY
 // ============================================================================
 client.on('ready', () => {
     console.log(`🛡️ n0mit Safeguard opérationnel sur ${client.guilds.cache.size} serveur(s).`);
@@ -104,63 +233,51 @@ client.on('ready', () => {
 });
 
 client.on('guildCreate', async (guild) => {
-    console.log(`🎉 Nouveau serveur : ${guild.name} (${guild.memberCount} membres)`);
     try {
         const targetChannel = await getOrCreateCoreChannel(guild);
         if (!targetChannel) return;
 
-        const welcomeMessage = `
-🛡️ **n0mit Safeguard est désormais opérationnel !**
-*Écosystème **n0mit CoreSystems***
+        const welcomeEmbed = new EmbedBuilder()
+            .setTitle("🛡️ n0mit Safeguard | Protection Active")
+            .setColor(0x57F287)
+            .setDescription(`**Système de Sécurité Avancé Opérationnel**\nCe serveur est désormais sous la protection active de l'écosystème **n0mit CoreSystems**.`)
+            .addFields(
+                { name: "🛡️ Anti-Nuke Staff", value: "Neutre automatiquement les membres du personnel piratés ou malveillants.", inline: true },
+                { name: "🤖 Protection Bots", value: "Bloque l'ajout non-autorisé de bots tiers.", inline: true },
+                { name: "🔍 Filtres Actifs", value: "Anti-Invite, Anti-Phishing, Anti-GhostPing.", inline: true }
+            )
+            .setFooter({ text: "Tapez !help pour afficher le panneau de commande" })
+            .setTimestamp();
 
-Ce bot assure la protection et la modération autonome de votre établissement.
-
-⚙️ **Protections passives actives :**
-• Filtration des liens d'invitations externes & liens frauduleux.
-• Protection contre le spam de mentions globales (\`@everyone\` / \`@here\`).
-• Détection des pings fantômes (Ghost-pings).
-• Outils administratifs d'urgence non-intrusifs.
-
-📌 **Information :** Ce salon (\`#${targetChannel.name}\`) est mutualisé pour recevoir les mises à jour de l'écosystème.
-
-Tapez \`!help\` pour afficher le manuel d'utilisation.
-        `;
-
-        await targetChannel.send(welcomeMessage);
+        await targetChannel.send({ embeds: [welcomeEmbed] });
     } catch (err) {
-        console.error("Erreur lors de l'accueil :", err);
+        console.error("Erreur accueil :", err);
     }
 });
 
-// Protection Anti-Raid à l'arrivée d'un membre
-client.on('guildMemberAdd', async (member) => {
-    const cfg = getConfig(member.guild.id);
-    if (!cfg.antiRaid) return;
-
-    // Si le compte a moins de 24h et que l'anti-raid est ON
-    const accountAgeDays = (Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24);
-    if (accountAgeDays < 1) {
-        try {
-            await member.timeout(24 * 60 * 60 * 1000, "Anti-Raid Actif : Compte créé il y a moins de 24h.");
-            await sendSecurityLog(member.guild, `🚨 **Anti-Raid** : Le compte très récent de ${member} (${member.user.tag}) a été mis en quarantaine temporaire.`);
-        } catch (e) {}
-    }
-});
-
-// Détection des Ghost-Pings (Mentions supprimées)
+// Détection Ghost Ping
 client.on('messageDelete', async (message) => {
     if (!message.guild || message.author?.bot) return;
     const cfg = getConfig(message.guild.id);
     if (!cfg.antiGhostPing) return;
 
     if (message.mentions.members.size > 0 || message.mentions.roles.size > 0) {
-        await sendSecurityLog(message.guild, `👻 **Ghost Ping détecté** dans <#${message.channel.id}> par **${message.author.tag}**.`);
+        const ghostEmbed = new EmbedBuilder()
+            .setTitle("👻 Ghost-Ping Détecté")
+            .setColor(0xFEE75C)
+            .addFields(
+                { name: "Auteur", value: `${message.author.tag} (<@${message.author.id}>)`, inline: true },
+                { name: "Salon", value: `<#${message.channel.id}>`, inline: true },
+                { name: "Contenu supprimé", value: message.content || "*Contenu inconnu*" }
+            )
+            .setTimestamp();
+
+        await sendSecurityLog(message.guild, ghostEmbed);
     }
 });
 
-
 // ============================================================================
-// 5. GESTION DES MESSAGES & FILTRES DE SÉCURITÉ PASSIFS
+// 6. GESTION DES MESSAGES & COMMANDES
 // ============================================================================
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
@@ -168,80 +285,118 @@ client.on('messageCreate', async (message) => {
     const cfg = getConfig(message.guild.id);
     const isStaff = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
 
-    // ------------------------------------------------------------------------
-    // FILTRE 1 : Anti-Invite Discord
-    // ------------------------------------------------------------------------
+    // --- FILTRES PASSIFS PRODUISANT DES EMBEDS PROPRES ---
     if (cfg.antiInvite && !isStaff) {
         const inviteRegex = /(discord\.(gg|me|com)|discordapp\.com\/invite)\/[a-zA-Z0-9]+/i;
         if (inviteRegex.test(message.content)) {
             await message.delete().catch(() => {});
-            await sendSecurityLog(message.guild, `🚫 Invitation supprimée de **${message.author.tag}** dans <#${message.channel.id}>.`);
-            return message.channel.send(`⚠️ ${message.author}, les invitations externes ne sont pas autorisées ici.`);
+            
+            const warnEmbed = new EmbedBuilder()
+                .setColor(0xED4245)
+                .setDescription(`⚠️ ${message.author}, les pub/liens d'invitations externes sont strictement interdits ici.`);
+
+            const logEmbed = new EmbedBuilder()
+                .setTitle("🚫 Lien d'invitation bloqué")
+                .setColor(0xED4245)
+                .addFields(
+                    { name: "Membre", value: `${message.author.tag}`, inline: true },
+                    { name: "Salon", value: `<#${message.channel.id}>`, inline: true }
+                )
+                .setTimestamp();
+
+            await sendSecurityLog(message.guild, logEmbed);
+            return message.channel.send({ embeds: [warnEmbed] }).then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
         }
     }
 
-    // ------------------------------------------------------------------------
-    // FILTRE 2 : Anti-Phishing & Liens Malveillants
-    // ------------------------------------------------------------------------
     if (cfg.antiPhishing && !isStaff) {
         const scamRegex = /(steamcommun|discord-gift|free-nitro|steam-promo|airdrop-gift|grabify|iplogger)/i;
         if (scamRegex.test(message.content)) {
             await message.delete().catch(() => {});
-            try {
-                await message.member.timeout(15 * 60 * 1000, "Lien frauduleux/Phishing détecté");
-            } catch(e) {}
-            await sendSecurityLog(message.guild, `🚨 **Lien Suspect/Phishing** supprimé de **${message.author.tag}** (Membre muté 15 min).`);
-            return message.channel.send(`🚨 ${message.author}, tentative d'envoi de lien malveillant détectée.`);
+            try { await message.member.timeout(30 * 60 * 1000, "Envoi de lien frauduleux"); } catch(e) {}
+
+            const scamEmbed = new EmbedBuilder()
+                .setTitle("🚨 TENTATIVE DE PHISHING DÉTECTÉE")
+                .setColor(0xED4245)
+                .setDescription(`L'utilisateur ${message.author} a envoyé un lien hautement suspect et a été réduit au silence pendant 30 minutes.`)
+                .setTimestamp();
+
+            await sendSecurityLog(message.guild, scamEmbed);
+            return message.channel.send({ embeds: [scamEmbed] });
         }
     }
 
-    // ------------------------------------------------------------------------
-    // FILTRE 3 : Anti-Spam Mention Global (@everyone / @here)
-    // ------------------------------------------------------------------------
-    if (cfg.antiEveryone && message.mentions.everyone && !message.member.permissions.has(PermissionFlagsBits.MentionEveryone)) {
-        await message.delete().catch(() => {});
-        try {
-            await message.member.timeout(10 * 60 * 1000, "Spam de mention globale");
-        } catch (e) {}
-        await sendSecurityLog(message.guild, `🚨 **Abus Mention Globale** par **${message.author.tag}** dans <#${message.channel.id}>.`);
-        return message.channel.send(`🚨 ${message.author}, abus de mention globale interdit (Exclusion temporaire 10 min).`);
-    }
+    // --- COMMANDES ADMINISTRATIVES ---
 
-    // ============================================================================
-    // 6. COMMANDES DU BOT (!)
-    // ============================================================================
-
-    // --- COMMANDE : !help ---
+    // 1. COMMANDE !HELP SOUS FORME D'EMBED PROFESSIONNEL
     if (message.content === '!help' || message.content === '.help') {
-        const helpText = `
-🛡️ **--- MANUEL DE SÉCURITÉ n0mit Safeguard ---** 🛡️
-*n0mit CoreSystems*
+        const helpEmbed = new EmbedBuilder()
+            .setTitle("🛡️ Centre de Contrôle n0mit Safeguard")
+            .setColor(0x5865F2)
+            .setDescription("Système d'auto-défense autonome et de modération de haute précision.")
+            .addFields(
+                { 
+                    name: "⚙️ Sécurité & Diagnostic", 
+                    value: "`!secscore` : Analyse et note le niveau de sécurité du serveur.\n`!config` : Gère les modules de protection pas-à-pas.\n`!setlog #salon` : Configure le salon des rapports discrets." 
+                },
+                { 
+                    name: "🚨 Gestion de Crise & Staff", 
+                    value: "`!lockdown on/off` : Bloque/Débloque les envois de messages.\n`!purgeuser @membre` : Purge les messages d'un compte suspect.\n`!nuke` : Recommence le salon de zéro." 
+                },
+                { 
+                    name: "🛠️ Sanctions Administratives", 
+                    value: "`!warn @membre [raison]` | `!mute @membre [min]`\n`!kick @membre [raison]` | `!ban @membre [raison]`" 
+                }
+            )
+            .setFooter({ text: "Écosystème n0mit CoreSystems • Protection Haute Disponibilité" })
+            .setTimestamp();
 
-**🛠️ Modération & Sanctions :**
-• \`!warn @membre [raison]\` : Émet un avertissement officiel.
-• \`!mute @membre [minutes] [raison]\` : Met un membre en sourdine.
-• \`!unmute @membre\` : Rétablit la parole d'un membre.
-• \`!kick @membre [raison]\` : Expulse un membre.
-• \`!ban @membre [raison]\` : Bannit définitivement un utilisateur.
-• \`!unban [ID_utilisateur]\` : Débannit un utilisateur.
-
-**🚨 Gestion de Crise & Salons :**
-• \`!lockdown on/off\` : Verrouille ou déverrouille le salon actuel.
-• \`!slowmode [secondes]\` : Configure le mode lent.
-• \`!clear [1-100]\` : Nettoie un nombre précis de messages.
-• \`!purgeuser @membre [1-100]\` : Supprime les messages récents d'un membre ciblé.
-• \`!nuke\` : Recommence le salon à neuf en cas de raid extrême.
-
-**⚙️ Configuration & Sécurité :**
-• \`!config\` : Affiche et modifie l'état des modules de sécurité.
-• \`!antiraid on/off\` : Active/Désactive le verrouillage des comptes récents.
-• \`!setlog #salon\` : Définit le salon des logs de sécurité silencieux.
-• \`!serverinfo\` : Rapport global de sécurité du serveur.
-        `;
-        return message.reply(helpText);
+        return message.reply({ embeds: [helpEmbed] });
     }
 
-    // --- COMMANDE : !config ---
+    // 2. COMMANDE EXCLUSIVE : DIAGNOSTIC DE SÉCURITÉ (!secscore)
+    if (message.content === '!secscore') {
+        if (!isStaff) return message.reply("❌ Permission insuffisante.");
+
+        let score = 100;
+        const recommendations = [];
+
+        // Check 1: Roles @everyone avec permissions dangereuses
+        const everyoneRole = message.guild.roles.everyone;
+        if (everyoneRole.permissions.has(PermissionFlagsBits.MentionEveryone)) {
+            score -= 25;
+            recommendations.push("❌ Retirez la permission `@everyone` de mentionner tout le monde.");
+        }
+        if (everyoneRole.permissions.has(PermissionFlagsBits.ManageMessages)) {
+            score -= 30;
+            recommendations.push("❌ Risque critique : `@everyone` a la permission de gérer les messages !");
+        }
+
+        // Check 2: Salon de logs configuré
+        if (!cfg.logChannelId) {
+            score -= 15;
+            recommendations.push("⚠️ Aucun salon de logs configuré (`!setlog #salon`).");
+        }
+
+        // Check 3: Nombre d'administrateurs
+        const adminCount = message.guild.members.cache.filter(m => m.permissions.has(PermissionFlagsBits.Administrator) && !m.user.bot).size;
+        if (adminCount > 5) {
+            score -= 10;
+            recommendations.push(`⚠️ Vous avez ${adminCount} administrateurs humains. Réduisez ce nombre pour limiter les risques.`);
+        }
+
+        const color = score >= 80 ? 0x57F287 : score >= 50 ? 0xFEE75C : 0xED4245;
+
+        const scoreEmbed = new EmbedBuilder()
+            .setTitle(`📊 Audit de Sécurité : ${message.guild.name}`)
+            .setColor(color)
+            .setDescription(`**Score de Sécurité Global : ${score}/100**\n\n` + (recommendations.length > 0 ? recommendations.join("\n") : "✅ Votre serveur est parfaitement sécurisé selon nos standards !"))
+            .setTimestamp();
+
+        return message.reply({ embeds: [scoreEmbed] });
+    }
+
+    // 3. CONFIGURATION DES MODULES (!config)
     if (message.content.startsWith('!config')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const args = message.content.split(' ');
@@ -249,64 +404,47 @@ client.on('messageCreate', async (message) => {
         const state = args[2]?.toLowerCase();
 
         if (!option) {
-            return message.reply(`
-⚙️ **Configuration des modules pour ce serveur :**
-• \`anti-invite\` : ${cfg.antiInvite ? '✅ Activé' : '❌ Désactivé'}
-• \`anti-phishing\` : ${cfg.antiPhishing ? '✅ Activé' : '❌ Désactivé'}
-• \`anti-everyone\` : ${cfg.antiEveryone ? '✅ Activé' : '❌ Désactivé'}
-• \`anti-ghostping\` : ${cfg.antiGhostPing ? '✅ Activé' : '❌ Désactivé'}
-• \`anti-raid\` : ${cfg.antiRaid ? '🚨 Activé' : '⚪ Désactivé'}
-• \`salon-log\` : ${cfg.logChannelId ? `<#${cfg.logChannelId}>` : 'Aucun'}
+            const configEmbed = new EmbedBuilder()
+                .setTitle("⚙️ Panneau de Configuration Safeguard")
+                .setColor(0x2B2D31)
+                .addFields(
+                    { name: "Anti-Invite (`anti-invite`)", value: cfg.antiInvite ? '🟢 Actif' : '🔴 Inactif', inline: true },
+                    { name: "Anti-Phishing (`anti-phishing`)", value: cfg.antiPhishing ? '🟢 Actif' : '🔴 Inactif', inline: true },
+                    { name: "Anti-Everyone (`anti-everyone`)", value: cfg.antiEveryone ? '🟢 Actif' : '🔴 Inactif', inline: true },
+                    { name: "Anti-GhostPing (`anti-ghostping`)", value: cfg.antiGhostPing ? '🟢 Actif' : '🔴 Inactif', inline: true },
+                    { name: "Anti-Nuke Staff (`anti-nuke`)", value: cfg.antiNukeStaff ? '🛡️ Actif (Sécurisé)' : '🔴 Inactif', inline: true },
+                    { name: "Anti-Bot Tiers (`anti-bot`)", value: cfg.antiUnauthorizedBot ? '🛡️ Actif' : '🔴 Inactif', inline: true }
+                )
+                .setFooter({ text: "Exemple d'utilisation : !config anti-invite off" });
 
-*Exemple pour modifier : \`!config anti-invite off\`*
-            `);
+            return message.reply({ embeds: [configEmbed] });
         }
 
-        if (state !== 'on' && state !== 'off') {
-            return message.reply("⚠️ Spécifiez `on` ou `off`. Exemple : `!config anti-invite off`");
-        }
+        if (state !== 'on' && state !== 'off') return message.reply("⚠️ Spécifiez `on` ou `off`.");
 
         const isTrue = state === 'on';
         if (option === 'anti-invite') cfg.antiInvite = isTrue;
         else if (option === 'anti-phishing') cfg.antiPhishing = isTrue;
         else if (option === 'anti-everyone') cfg.antiEveryone = isTrue;
         else if (option === 'anti-ghostping') cfg.antiGhostPing = isTrue;
+        else if (option === 'anti-nuke') cfg.antiNukeStaff = isTrue;
+        else if (option === 'anti-bot') cfg.antiUnauthorizedBot = isTrue;
         else return message.reply("⚠️ Module inconnu.");
 
-        return message.reply(`✅ Module **${option}** réglé sur : **${state.toUpperCase()}**.`);
+        return message.reply(`✅ Le module **${option}** a été défini sur **${state.toUpperCase()}**.`);
     }
 
-    // --- COMMANDE : !antiraid ---
-    if (message.content.startsWith('!antiraid')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return message.reply("❌ Réservé aux administrateurs.");
-        }
-        const state = message.content.split(' ')[1]?.toLowerCase();
-
-        if (state === 'on') {
-            cfg.antiRaid = true;
-            await sendSecurityLog(message.guild, `🚨 **Mode Anti-Raid ACTIVÉ** par ${message.author}.`);
-            return message.channel.send("🚨 **MODE ANTI-RAID ACTIVÉ.** Les comptes de moins de 24h seront automatiquement mis en quarantaine.");
-        } else if (state === 'off') {
-            cfg.antiRaid = false;
-            await sendSecurityLog(message.guild, `⚪ **Mode Anti-Raid DÉSACTIVÉ** par ${message.author}.`);
-            return message.channel.send("✅ **MODE ANTI-RAID DÉSACTIVÉ.** Le flux d'arrivée normal est rétabli.");
-        } else {
-            return message.reply("Utilisation : `!antiraid on` ou `!antiraid off`");
-        }
-    }
-
-    // --- COMMANDE : !setlog ---
+    // 4. DÉFINIR SALON DE LOGS (!setlog)
     if (message.content.startsWith('!setlog')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const channel = message.mentions.channels.first();
         if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité`");
 
         cfg.logChannelId = channel.id;
-        return message.reply(`✅ Salon des logs de sécurité défini sur : ${channel}`);
+        return message.reply(`✅ Salon de logs de sécurité connecté avec succès sur : ${channel}`);
     }
 
-    // --- COMMANDE : !purgeuser ---
+    // 5. PURGER UN MEMBRE SPECIFIQUE (!purgeuser)
     if (message.content.startsWith('!purgeuser')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const targetMember = message.mentions.members.first();
@@ -321,207 +459,65 @@ client.on('messageCreate', async (message) => {
             const userMessages = messages.filter(m => m.author.id === targetMember.id).first(limit);
 
             await message.channel.bulkDelete(userMessages, true);
-            const confirmation = await message.channel.send(`🧹 Supprimé **${userMessages.length}** messages récents de ${targetMember}.`);
-            setTimeout(() => confirmation.delete().catch(() => {}), 3000);
+            const msg = await message.channel.send(`🧹 **${userMessages.length}** messages de ${targetMember} ont été supprimés.`);
+            setTimeout(() => msg.delete().catch(() => {}), 3000);
         } catch (e) {
-            return message.reply("❌ Erreur lors du nettoyage ciblé.");
+            return message.reply("❌ Erreur lors de la purge ciblée.");
         }
     }
 
-    // --- COMMANDE : !warn ---
+    // 6. WARN
     if (message.content.startsWith('!warn')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const member = message.mentions.members.first();
         if (!member) return message.reply("⚠️ Utilisation : `!warn @membre [raison]`");
         const reason = message.content.split(' ').slice(2).join(' ') || "Aucune raison spécifiée";
-        
-        await sendSecurityLog(message.guild, `⚠️ **Avertissement** émis contre **${member.user.tag}** par **${message.author.tag}**. Raison : *${reason}*`);
-        return message.channel.send(`⚠️ **AVERTISSEMENT** : ${member} a reçu un avertissement officiel.\n📌 **Raison** : *${reason}*`);
+
+        const warnEmbed = new EmbedBuilder()
+            .setTitle("⚠️ Avertissement Officiel")
+            .setColor(0xFEE75C)
+            .setDescription(`Le membre ${member} a reçu un avertissement.\n📌 **Raison** : *${reason}*`);
+
+        return message.channel.send({ embeds: [warnEmbed] });
     }
 
-    // --- COMMANDE : !slowmode ---
-    if (message.content.startsWith('!slowmode')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) return message.reply("❌ Permission insuffisante.");
-        const seconds = parseInt(message.content.split(' ')[1]);
-
-        if (isNaN(seconds) || seconds < 0 || seconds > 21600) {
-            return message.reply("⚠️ Utilisation : `!slowmode [secondes]` (0 pour désactiver).");
-        }
-
-        try {
-            await message.channel.setRateLimitPerUser(seconds);
-            return message.channel.send(`⏱️ Mode lent réglé à **${seconds}s** sur ce salon.`);
-        } catch (e) {
-            return message.reply("❌ Erreur de réglage du mode lent.");
-        }
-    }
-
-    // --- COMMANDE : !lockdown ---
+    // 7. LOCKDOWN
     if (message.content.startsWith('!lockdown')) {
         if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
         const state = message.content.split(' ')[1]?.toLowerCase();
 
         if (state === 'on') {
             await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false });
-            return message.channel.send("🚨 **SALON VERROUILLÉ.** Les envois de messages sont suspendus.");
+            return message.channel.send("🚨 **SALON VERROUILLÉ.** Tous les envois de messages par les utilisateurs sont suspendus.");
         } else if (state === 'off') {
             await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: null });
-            return message.channel.send("✅ **SALON DÉVERROUILLÉ.** L'accès au salon est rétabli.");
+            return message.channel.send("✅ **SALON DÉVERROUILLÉ.** L'accès d'écriture est rétabli.");
         } else {
             return message.reply("Utilisation : `!lockdown on` ou `!lockdown off`");
         }
     }
 
-    // --- COMMANDE : !mute ---
-    if (message.content.startsWith('!mute')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return message.reply("❌ Permission insuffisante.");
-        const args = message.content.split(' ');
-        const member = message.mentions.members.first();
-        const duration = parseInt(args[2]);
-
-        if (!member || isNaN(duration)) {
-            return message.reply("⚠️ Utilisation : `!mute @membre [minutes] [raison]`");
-        }
-
-        const reason = args.slice(3).join(' ') || "Aucune raison spécifiée";
-        try {
-            await member.timeout(duration * 60 * 1000, reason);
-            await sendSecurityLog(message.guild, `🔇 **Mute** : **${member.user.tag}** par **${message.author.tag}** (${duration} min). Raison : *${reason}*`);
-            return message.channel.send(`🔇 **${member.user.tag}** a été réduit au silence pendant ${duration} minute(s).`);
-        } catch (e) {
-            return message.reply("❌ Impossible de rendre ce membre muet.");
-        }
-    }
-
-    // --- COMMANDE : !unmute ---
-    if (message.content.startsWith('!unmute')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!unmute @membre`");
-
-        try {
-            await member.timeout(null);
-            await sendSecurityLog(message.guild, `🔊 **Unmute** : **${member.user.tag}** par **${message.author.tag}**.`);
-            return message.channel.send(`🔊 Le silence appliqué à **${member.user.tag}** a été levé.`);
-        } catch (e) {
-            return message.reply("❌ Erreur lors de la levée du silence.");
-        }
-    }
-
-    // --- COMMANDE : !kick ---
-    if (message.content.startsWith('!kick')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!kick @membre [raison]`");
-        const reason = message.content.split(' ').slice(2).join(' ') || "Aucune raison spécifiée";
-
-        try {
-            await member.kick(reason);
-            await sendSecurityLog(message.guild, `👢 **Expulsion** : **${member.user.tag}** par **${message.author.tag}**. Raison : *${reason}*`);
-            return message.channel.send(`👢 **${member.user.tag}** a été expulsé.`);
-        } catch (e) {
-            return message.reply("❌ Échec de l'expulsion.");
-        }
-    }
-
-    // --- COMMANDE : !ban ---
-    if (message.content.startsWith('!ban')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!ban @membre [raison]`");
-        const reason = message.content.split(' ').slice(2).join(' ') || "Aucune raison spécifiée";
-
-        try {
-            await member.ban({ reason });
-            await sendSecurityLog(message.guild, `🔨 **Bannissement** : **${member.user.tag}** par **${message.author.tag}**. Raison : *${reason}*`);
-            return message.channel.send(`🔨 **${member.user.tag}** a été banni.`);
-        } catch (e) {
-            return message.reply("❌ Échec du bannissement.");
-        }
-    }
-
-    // --- COMMANDE : !unban ---
-    if (message.content.startsWith('!unban')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return message.reply("❌ Permission insuffisante.");
-        const userId = message.content.split(' ')[1];
-        if (!userId) return message.reply("⚠️ Utilisation : `!unban [ID_utilisateur]`");
-
-        try {
-            await message.guild.members.unban(userId);
-            await sendSecurityLog(message.guild, `✅ **Débannissement** de l'ID \`${userId}\` par **${message.author.tag}**.`);
-            return message.channel.send(`✅ L'utilisateur avec l'ID \`${userId}\` a été débanni.`);
-        } catch (e) {
-            return message.reply("❌ Impossible de trouver ou débannir cet ID.");
-        }
-    }
-
-    // --- COMMANDE : !clear ---
-    if (message.content.startsWith('!clear')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const count = parseInt(message.content.split(' ')[1]);
-
-        if (isNaN(count) || count < 1 || count > 100) {
-            return message.reply("⚠️ Utilisation : `!clear [1-100]`");
-        }
-
-        try {
-            await message.delete().catch(() => {});
-            const deleted = await message.channel.bulkDelete(count, true);
-            const msg = await message.channel.send(`🧹 **${deleted.size}** messages supprimés.`);
-            setTimeout(() => msg.delete().catch(() => {}), 3000);
-        } catch (e) {
-            return message.reply("❌ Erreur (les messages de plus de 14 jours ne peuvent pas être supprimés en masse).");
-        }
-    }
-
-    // --- COMMANDE : !nuke ---
-    if (message.content === '!nuke') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
-        try {
-            const position = message.channel.position;
-            const newChannel = await message.channel.clone();
-            await message.channel.delete();
-            await newChannel.setPosition(position);
-            return newChannel.send("💥 **SALON RÉINITIALISÉ.** Ce salon a été purgé à 100 % suite à une procédure d'urgence.");
-        } catch (e) {
-            return message.reply("❌ Échec du nuke.");
-        }
-    }
-
-    // --- COMMANDE : !serverinfo ---
-    if (message.content === '!serverinfo') {
-        const guild = message.guild;
-        const infoMsg = `
-📊 **Rapport de Sécurité : ${guild.name}**
-• 👑 ID Propriétaire : \`${guild.ownerId}\`
-• 👥 Membres inscrits : \`${guild.memberCount}\`
-• 📅 Création de l'instance : \`${guild.createdAt.toLocaleDateString()}\`
-• 🔒 Niveau de sécurité Discord : \`${guild.verificationLevel}\`
-        `;
-        return message.reply(infoMsg);
-    }
-
-    // ============================================================================
-    // 7. COMMANDE PROPRIÉTAIRE : DIFFUSION NATIONALE / ACADÉMIQUE
-    // ============================================================================
+    // 8. COMMANDE PROPRIÉTAIRE : BROADCAST NATIONALE
     if (message.content.startsWith('!broadcast')) {
         if (message.author.id !== OWNER_ID) {
             return message.reply("❌ Seul le développeur n0mit CoreSystems peut exécuter une diffusion globale.");
         }
 
         const announcement = message.content.split(' ').slice(1).join(' ');
-        if (!announcement) {
-            return message.reply("⚠️ Utilisation : `!broadcast [texte du message]`");
-        }
+        if (!announcement) return message.reply("⚠️ Utilisation : `!broadcast [texte]`");
 
         let successCount = 0;
-        message.reply("🔄 Diffusion du message sur l'ensemble des établissements...");
+        const broadEmbed = new EmbedBuilder()
+            .setTitle("📢 COMMUNIQUÉ OFFICIEL n0mit CoreSystems")
+            .setColor(0x5865F2)
+            .setDescription(announcement)
+            .setTimestamp();
 
         for (const guild of client.guilds.cache.values()) {
             try {
                 const targetChannel = await getOrCreateCoreChannel(guild);
                 if (targetChannel) {
-                    await targetChannel.send(`📢 **COMMUNIQUÉ OFFICIEL n0mit CoreSystems**\n\n${announcement}`);
+                    await targetChannel.send({ embeds: [broadEmbed] });
                     successCount++;
                 }
             } catch (err) {
@@ -529,7 +525,7 @@ client.on('messageCreate', async (message) => {
             }
         }
 
-        return message.channel.send(`✅ Message diffusé avec succès sur **${successCount}** serveur(s).`);
+        return message.channel.send(`✅ Message diffusé avec succès sur **${successCount}** instance(s).`);
     }
 });
 
