@@ -33,8 +33,8 @@ async function getOrCreateCoreChannel(guild) {
     try {
         // 1. Cherche si le salon existe déjà (créé par SchoolBot ou Safeguard)
         let channel = guild.channels.cache.find(ch => 
-            ch.name.toLowerCase().includes("nomit-coresystems") || 
-            ch.name.toLowerCase().includes("nomit-info")
+            ch.name.toLowerCase().includes("n0mit-coresystems") || 
+            ch.name.toLowerCase().includes("n0mit-info")
         );
 
         // 2. Si non trouvé, on le crée proprement
