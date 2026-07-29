@@ -1,5 +1,5 @@
 // ============================================================================
-// 🛡️ n0mit Safeguard v3.0 - Édition Utile & Incontournable
+// 🛡️ n0mit Safeguard v3.2 - Édition Securité & Niveaux de Restriction
 // Écosystème n0mit CoreSystems
 // ============================================================================
 
@@ -19,27 +19,35 @@ const path = require('path');
 // 1. SERVEUR WEB KEEP-ALIVE
 // ============================================================================
 http.createServer((req, res) => {
-    res.write("n0mit Safeguard v3.0 - Online 24/7");
+    res.write("n0mit Safeguard v3.2 - Online 24/7");
     res.end();
 }).listen(process.env.PORT || 3000);
 
 // ============================================================================
-// 1.5 PERSISTANCE DES DONNÉES (RENDER RESTARTS FIX)
+// 1.5 PERSISTANCE DES DONNÉES (SAVED ON RESTART)
 // ============================================================================
 const DB_FILE = path.join(__dirname, 'database.json');
 
 function loadData() {
     try {
         if (!fs.existsSync(DB_FILE)) {
-            const initialData = { guildConfigs: {}, restrictedUsers: [] };
+            const initialData = { guildConfigs: {}, restrictedUsers: {} };
             fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
             return initialData;
         }
         const data = fs.readFileSync(DB_FILE, 'utf8');
-        return JSON.parse(data);
+        const parsed = JSON.parse(data);
+        
+        // Rétrocompatibilité si l'ancien format d'Array était utilisé
+        if (Array.isArray(parsed.restrictedUsers)) {
+            const newMap = {};
+            parsed.restrictedUsers.forEach(id => newMap[id] = 3);
+            parsed.restrictedUsers = newMap;
+        }
+        return parsed;
     } catch (e) {
         console.error("Erreur de chargement de la base de données :", e);
-        return { guildConfigs: {}, restrictedUsers: [] };
+        return { guildConfigs: {}, restrictedUsers: {} };
     }
 }
 
@@ -47,7 +55,7 @@ function saveData() {
     try {
         const dataToSave = {
             guildConfigs: Object.fromEntries(guildConfigs),
-            restrictedUsers: Array.from(restrictedUsers)
+            restrictedUsers: Object.fromEntries(restrictedUsers)
         };
         fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave, null, 2));
     } catch (e) {
@@ -57,7 +65,8 @@ function saveData() {
 
 const db = loadData();
 const guildConfigs = new Map(Object.entries(db.guildConfigs || {}));
-const restrictedUsers = new Set(db.restrictedUsers || []);
+// Map: UserID -> Restriction Level (1, 2, ou 3)
+const restrictedUsers = new Map(Object.entries(db.restrictedUsers || {}));
 
 // ============================================================================
 // 2. INITIALISATION & CONFIGURATION
@@ -79,7 +88,7 @@ const UNIFIED_CHANNEL_NAME = "📢｜n0mit-coresystems";
 
 const staffActionTracker = new Map();
 const spamTracker = new Map();
-const serverBackups = new Map(); // Stockage mémoire des sauvegardes
+const serverBackups = new Map();
 
 function getConfig(guildId) {
     if (!guildConfigs.has(guildId)) {
@@ -146,19 +155,6 @@ async function getOrCreateCoreChannel(guild) {
     }
 }
 
-client.on('channelCreate', async (channel) => {
-    if (!channel.guild) return;
-    if (channel.name.toLowerCase().includes("n0mit-coresystems")) {
-        const embed = new EmbedBuilder()
-            .setTitle("🔗 n0mit CoreSystems Sync")
-            .setColor(0x2B2D31)
-            .setDescription("Liaison réussie entre **n0mit Safeguard** et le salon système.")
-            .setTimestamp();
-
-        await channel.send({ embeds: [embed] }).catch(() => {});
-    }
-});
-
 // ============================================================================
 // 4. MODULES DE SÉCURITÉ AUTOMATIQUES
 // ============================================================================
@@ -171,7 +167,7 @@ client.on('guildMemberAdd', async (member) => {
         try {
             const logs = await member.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.BotAdd });
             const entry = logs.entries.first();
-            if (entry && entry.executor.id !== member.guild.ownerId) {
+            if (entry && entry.executor.id !== member.guild.ownerId && entry.executor.id !== OWNER_ID) {
                 await member.kick("Bot non autorisé par le propriétaire.");
                 const embed = new EmbedBuilder()
                     .setTitle("🚨 BOT NON AUTORISÉ EXPULSÉ")
@@ -198,7 +194,7 @@ client.on('guildMemberAdd', async (member) => {
     }
 });
 
-// B. Anti-Nuke Staff (Protection contre la destruction par un Admin)
+// B. Anti-Nuke Staff
 client.on('channelDelete', async (channel) => {
     if (!channel.guild) return;
     const cfg = getConfig(channel.guild.id);
@@ -210,7 +206,7 @@ client.on('channelDelete', async (channel) => {
         if (!entry) return;
 
         const executor = entry.executor;
-        if (executor.id === channel.guild.ownerId || executor.id === client.user.id) return;
+        if (executor.id === channel.guild.ownerId || executor.id === client.user.id || executor.id === OWNER_ID) return;
 
         const key = `${channel.guild.id}_${executor.id}`;
         const now = Date.now();
@@ -249,9 +245,13 @@ client.on('channelDelete', async (channel) => {
     } catch (e) {}
 });
 
-// C. Ghost-Ping Detection
+// C. Ghost-Ping Detection (Correctif pour ignorer la suppression automatique de commandes)
 client.on('messageDelete', async (message) => {
     if (!message.guild || message.author?.bot) return;
+    
+    // Ignorer si la suppression provient d'une commande du bot
+    if (message.content.startsWith('!') || message.content.startsWith('.')) return;
+
     const cfg = getConfig(message.guild.id);
     if (!cfg.antiGhostPing) return;
 
@@ -273,28 +273,8 @@ client.on('messageDelete', async (message) => {
 // 5. READY ET ÉVÉNEMENTS
 // ============================================================================
 client.on('ready', () => {
-    console.log(`🛡️ n0mit Safeguard v3.0 actif pour ${client.guilds.cache.size} serveurs.`);
+    console.log(`🛡️ n0mit Safeguard v3.2 actif pour ${client.guilds.cache.size} serveurs.`);
     client.user.setActivity('Protéger le serveur | !help', { type: 3 });
-});
-
-client.on('guildCreate', async (guild) => {
-    try {
-        const targetChannel = await getOrCreateCoreChannel(guild);
-        if (!targetChannel) return;
-
-        const welcomeEmbed = new EmbedBuilder()
-            .setTitle("🛡️ n0mit Safeguard v3.0 | Protection Maximale")
-            .setColor(0x57F287)
-            .setDescription("Ce serveur est sécurisé par l'écosystème **n0mit CoreSystems**.")
-            .addFields(
-                { name: "🛡️ Anti-Nuke Staff", value: "Neutralise les modérateurs malveillants.", inline: true },
-                { name: "⚡ Anti-Spam & Zalgo", value: "Filtre les caractères toxiques et le spam.", inline: true },
-                { name: "📦 Sauvegarde Express", value: "`!backup` pour sécuriser vos salons.", inline: true }
-            )
-            .setFooter({ text: "Tapez !help pour consulter la liste des commandes." });
-
-        await targetChannel.send({ embeds: [welcomeEmbed] });
-    } catch (err) {}
 });
 
 // ============================================================================
@@ -305,24 +285,48 @@ client.on('messageCreate', async (message) => {
 
     const cfg = getConfig(message.guild.id);
 
-    // --- SÉCURITÉ RESTRICTION (SI ACTIVÉ DANS LA CONFIG) ---
+    // --- GESTION DES NIVEAUX DE RESTRICTION ---
     if (cfg.restrictSystem && restrictedUsers.has(message.author.id)) {
-        // PERMETTRE À L'OWNER DE SE DÉ-RESTREINDRE SEUL EN CAS DE TEST BLOQUÉ
-        if (message.author.id === OWNER_ID && message.content.startsWith('!unrestrict')) {
-            // Laisse passer la commande
-        } else {
-            await message.delete().catch(() => {});
-            return message.channel.send(`🚫 ${message.author}, vous êtes actuellement restreint. Vos actions sont bloquées.`)
-                .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+        const level = restrictedUsers.get(message.author.id);
+
+        // Bypasses de sécurité pour le Owner
+        const isUnrestrictCmd = message.author.id === OWNER_ID && message.content.startsWith('!unrestrict');
+
+        if (!isUnrestrictCmd) {
+            // NIVEAU 3 : Aucun message autorisé
+            if (level === 3) {
+                await message.delete().catch(() => {});
+                return message.channel.send(`🚫 ${message.author}, vous êtes restreint (Niveau 3 : Envoi de messages bloqué).`)
+                    .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+            }
+
+            // NIVEAU 2 : Aucune commande autorisée
+            if (level === 2 && (message.content.startsWith('!') || message.content.startsWith('.'))) {
+                await message.delete().catch(() => {});
+                return message.channel.send(`🚫 ${message.author}, vos commandes sont bloquées (Restriction Niveau 2).`)
+                    .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+            }
+
+            // NIVEAU 1 : Commandes basiques uniquement (!help, !serverinfo, !report)
+            if (level === 1 && (message.content.startsWith('!') || message.content.startsWith('.'))) {
+                const allowedCmds = ['!help', '!serverinfo', '!report'];
+                const cmd = message.content.split(' ')[0].toLowerCase();
+                if (!allowedCmds.includes(cmd)) {
+                    await message.delete().catch(() => {});
+                    return message.channel.send(`⚠️ ${message.author}, niveau de privilège restreint (Commandes basiques uniquement).`)
+                        .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+                }
+            }
         }
     }
 
     const isStaff = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
+    const isOwner = message.author.id === OWNER_ID || message.author.id === message.guild.ownerId;
 
     // --- FILTRES PASSIFS ---
 
-    // 1. Anti-Spam Rapide
-    if (cfg.antiSpam && !isStaff) {
+    // 1. Anti-Spam
+    if (cfg.antiSpam && !isStaff && !isOwner) {
         const userId = message.author.id;
         const now = Date.now();
         const userSpam = spamTracker.get(userId) || { count: 0, lastMsg: now };
@@ -341,26 +345,26 @@ client.on('messageCreate', async (message) => {
         spamTracker.set(userId, userSpam);
     }
 
-    // 2. Anti-Zalgo & Caractères Suspects
-    if (cfg.antiZalgo && !isStaff) {
+    // 2. Anti-Zalgo
+    if (cfg.antiZalgo && !isStaff && !isOwner) {
         const zalgoRegex = /[\u0300-\u036f\u1ab0-\u1ace\u1dc0-\u1ffe\u20d0-\u20ff]/g;
         if (zalgoRegex.test(message.content)) {
             await message.delete().catch(() => {});
-            return message.channel.send(`⚠️ ${message.author}, les caractères invisibles ou altérés sont interdits.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+            return message.channel.send(`⚠️ ${message.author}, les caractères altérés sont interdits.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
         }
     }
 
-    // 3. Anti-Invite
-    if (cfg.antiInvite && !isStaff) {
+    // 3. Anti-Invite (EXCEPTION OWNER APPLIQUÉE)
+    if (cfg.antiInvite && !isStaff && !isOwner) {
         const inviteRegex = /(discord\.(gg|me|com)|discordapp\.com\/invite)\/[a-zA-Z0-9]+/i;
         if (inviteRegex.test(message.content)) {
             await message.delete().catch(() => {});
-            return message.channel.send(`⚠️ ${message.author}, pub/invitation interdite.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+            return message.channel.send(`⚠️ ${message.author}, la publication d'invitations est interdite.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
         }
     }
 
     // 4. Anti-Phishing
-    if (cfg.antiPhishing && !isStaff) {
+    if (cfg.antiPhishing && !isStaff && !isOwner) {
         const scamRegex = /(steamcommun|discord-gift|free-nitro|steam-promo|airdrop-gift|grabify|iplogger)/i;
         if (scamRegex.test(message.content)) {
             await message.delete().catch(() => {});
@@ -370,27 +374,58 @@ client.on('messageCreate', async (message) => {
     }
 
     // ============================================================================
-    // COMMANDES CACHÉES / SÉCURISÉES (NE FIGURENT PAS DANS !HELP)
+    // COMMANDES DISCRÈTES / RESTREINTES
     // ============================================================================
 
-    // 🔒 RESTRICTION D'UN MEMBRE (Requiert OBLIGATOIREMENT le mot de passe 6280)
+    // 📜 MANUEL STAFF ET DÉTAILS DE RESTRICTION
+    if (message.content === '!staff') {
+        if (!isStaff && !isOwner) return message.reply("❌ Accès réservé aux membres du Staff.");
+
+        const staffEmbed = new EmbedBuilder()
+            .setTitle("🔒 n0mit Safeguard - Documentation Staff")
+            .setColor(0x2B2D31)
+            .setDescription("Guide des commandes d'administration et du système de restriction.")
+            .addFields(
+                {
+                    name: "⚙️ Système de Restriction (Multi-Niveaux)",
+                    value: 
+                        "• **Niveau 1 (Soft)** : Permet uniquement `!help`, `!serverinfo` et `!report`. Bloque l'accès aux autres commandes.\n" +
+                        "• **Niveau 2 (Medium)** : Bloque l'exécution de **toutes** les commandes. L'utilisateur peut discuter normalement.\n" +
+                        "• **Niveau 3 (Hard)** : Supprime automatiquement **tous les messages** envoyés par le membre (Mute total par le bot)."
+                },
+                {
+                    name: "📌 Syntaxe des Commandes de Restriction",
+                    value: 
+                        "`!restrict @membre [1/2/3] [6280]` • *Applique une restriction avec le niveau voulu*\n" +
+                        "`!unrestrict @membre [6280]` • *Lève la restriction appliquée*"
+                }
+            )
+            .setFooter({ text: "Information confidentielle de modération" });
+
+        return message.reply({ embeds: [staffEmbed] });
+    }
+
+    // 🔒 APPLICATION DE LA RESTRICTION (NIVEAUX 1 À 3)
     if (message.content.startsWith('!restrict')) {
         if (!cfg.restrictSystem) return message.reply("❌ Le système de restriction est désactivé sur ce serveur.");
-        
+
         const args = message.content.split(' ');
         const target = message.mentions.members.first();
-        const pass = args[2];
+        const level = parseInt(args[2]);
+        const pass = args[3];
 
-        if (!target) return message.reply("⚠️ Utilisation : `!restrict @membre [mot_de_passe]`");
+        if (!target || isNaN(level) || level < 1 || level > 3) {
+            return message.reply("⚠️ Utilisation : `!restrict @membre [niveau 1-3] [mot_de_passe]`");
+        }
 
         if (pass !== RESTRICT_PASSWORD) {
             return message.reply("❌ Mot de passe de restriction incorrect.");
         }
 
-        restrictedUsers.add(target.id);
+        restrictedUsers.set(target.id, level);
         saveData();
 
-        return message.channel.send(`🚫 **${target.user.tag}** a été restreint.`);
+        return message.channel.send(`🚫 **${target.user.tag}** a été restreint au **Niveau ${level}**.`);
     }
 
     // 🔓 LEVÉE DE LA RESTRICTION
@@ -401,7 +436,7 @@ client.on('messageCreate', async (message) => {
         const target = message.mentions.members.first();
         const pass = args[2];
 
-        // Exception Owner pour s'unrestrict si bloqué
+        // Exception Owner pour secours rapide
         if (message.author.id === OWNER_ID) {
             restrictedUsers.delete(message.author.id);
             if (target) restrictedUsers.delete(target.id);
@@ -422,10 +457,9 @@ client.on('messageCreate', async (message) => {
     }
 
     // ============================================================================
-    // COMMANDES COMPLÈTES (!HELP)
+    // COMMANDES PUBLIQUES (!HELP)
     // ============================================================================
 
-    // 📜 MENU AIDE
     if (message.content === '!help' || message.content === '.help') {
         const helpEmbed = new EmbedBuilder()
             .setTitle("🛡️ Centre de Contrôle n0mit Safeguard")
@@ -452,7 +486,7 @@ client.on('messageCreate', async (message) => {
                         "`!nuke` • *Recommence le salon à neuf (Admin)*"
                 },
                 {
-                    name: "⚙️ Sécurité, Filtres & Backups",
+                    name: "⚙️ Sécurité & Backups",
                     value: 
                         "`!secscore` • *Audit et note de sécurité du serveur /100*\n" +
                         "`!config` • *Affiche et gère l'état de tous les modules*\n" +
@@ -508,7 +542,7 @@ client.on('messageCreate', async (message) => {
         return message.reply({ embeds: [backupEmbed] });
     }
 
-    // SIGNALEMENT MEMBRE
+    // SIGNALEMENT MEMBRE (SANS DÉCLENCHER DE GHOST PING)
     if (message.content.startsWith('!report')) {
         const member = message.mentions.members.first();
         const reason = message.content.split(' ').slice(2).join(' ');
@@ -527,10 +561,10 @@ client.on('messageCreate', async (message) => {
             .setTimestamp();
 
         await sendSecurityLog(message.guild, reportEmbed);
-        return message.channel.send(`✅ Merci ${message.author}, votre signalement a été transmitted à l'équipe de modération.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+        return message.channel.send(`✅ Merci ${message.author}, votre signalement a été transmis à l'équipe.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
     }
 
-    // CONFIGURATION MODULES
+    // CONFIGURATION DES MODULES
     if (message.content.startsWith('!config')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const args = message.content.split(' ');
@@ -539,7 +573,7 @@ client.on('messageCreate', async (message) => {
 
         if (!option) {
             const configEmbed = new EmbedBuilder()
-                .setTitle("⚙️ Configuration Safeguard v3.0")
+                .setTitle("⚙️ Configuration Safeguard v3.2")
                 .setColor(0x2B2D31)
                 .addFields(
                     { name: "anti-invite", value: cfg.antiInvite ? '🟢 Actif' : '🔴 Inactif', inline: true },
@@ -717,7 +751,7 @@ client.on('messageCreate', async (message) => {
         return message.reply(`📊 **${message.guild.name}**\n• Propriétaire : <@${message.guild.ownerId}>\n• Membres : \`${message.guild.memberCount}\`\n• Créé le : \`${message.guild.createdAt.toLocaleDateString()}\``);
     }
 
-    // COMMANDE CACHÉE DÉVELOPPEUR (DISCRÈTE - NE FIGURE PAS DANS !HELP)
+    // COMMANDE DISCRÈTE PROPRIÉTAIRE (DIFFUSION)
     if (message.content.startsWith('!broadcast')) {
         if (message.author.id !== OWNER_ID) return;
         const announcement = message.content.split(' ').slice(1).join(' ');
