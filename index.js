@@ -93,6 +93,7 @@ function getConfig(guildId) {
             antiRaid: false,
             antiSpam: true,
             antiZalgo: true,
+            restrictSystem: true,
             logChannelId: null
         });
         saveData();
@@ -302,14 +303,20 @@ client.on('guildCreate', async (guild) => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // --- VÉRIFICATION RESTRICTION ---
-    if (restrictedUsers.has(message.author.id)) {
-        await message.delete().catch(() => {});
-        return message.channel.send(`🚫 ${message.author}, vous êtes actuellement restreint. Vos actions sont bloquées.`)
-            .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+    const cfg = getConfig(message.guild.id);
+
+    // --- SÉCURITÉ RESTRICTION (SI ACTIVÉ DANS LA CONFIG) ---
+    if (cfg.restrictSystem && restrictedUsers.has(message.author.id)) {
+        // PERMETTRE À L'OWNER DE SE DÉ-RESTREINDRE SEUL EN CAS DE TEST BLOQUÉ
+        if (message.author.id === OWNER_ID && message.content.startsWith('!unrestrict')) {
+            // Laisse passer la commande
+        } else {
+            await message.delete().catch(() => {});
+            return message.channel.send(`🚫 ${message.author}, vous êtes actuellement restreint. Vos actions sont bloquées.`)
+                .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+        }
     }
 
-    const cfg = getConfig(message.guild.id);
     const isStaff = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
 
     // --- FILTRES PASSIFS ---
@@ -363,37 +370,49 @@ client.on('messageCreate', async (message) => {
     }
 
     // ============================================================================
-    // COMMANDES COMPLÈTES (!HELP)
+    // COMMANDES CACHÉES / SÉCURISÉES (NE FIGURENT PAS DANS !HELP)
     // ============================================================================
 
-    // 🔒 RESTRICTION D'UN MEMBRE
+    // 🔒 RESTRICTION D'UN MEMBRE (Requiert OBLIGATOIREMENT le mot de passe 6280)
     if (message.content.startsWith('!restrict')) {
+        if (!cfg.restrictSystem) return message.reply("❌ Le système de restriction est désactivé sur ce serveur.");
+        
         const args = message.content.split(' ');
         const target = message.mentions.members.first();
         const pass = args[2];
 
         if (!target) return message.reply("⚠️ Utilisation : `!restrict @membre [mot_de_passe]`");
 
-        if (message.author.id !== OWNER_ID && pass !== RESTRICT_PASSWORD) {
-            return message.reply("❌ Permission insuffisante ou mot de passe incorrect.");
+        if (pass !== RESTRICT_PASSWORD) {
+            return message.reply("❌ Mot de passe de restriction incorrect.");
         }
 
         restrictedUsers.add(target.id);
         saveData();
 
-        return message.channel.send(`🚫 **${target.user.tag}** a été ajouté à la liste des utilisateurs restreints.`);
+        return message.channel.send(`🚫 **${target.user.tag}** a été restreint.`);
     }
 
     // 🔓 LEVÉE DE LA RESTRICTION
     if (message.content.startsWith('!unrestrict')) {
+        if (!cfg.restrictSystem) return message.reply("❌ Le système de restriction est désactivé sur ce serveur.");
+
         const args = message.content.split(' ');
         const target = message.mentions.members.first();
         const pass = args[2];
 
+        // Exception Owner pour s'unrestrict si bloqué
+        if (message.author.id === OWNER_ID) {
+            restrictedUsers.delete(message.author.id);
+            if (target) restrictedUsers.delete(target.id);
+            saveData();
+            return message.channel.send(`✅ Restriction levée.`);
+        }
+
         if (!target) return message.reply("⚠️ Utilisation : `!unrestrict @membre [mot_de_passe]`");
 
-        if (message.author.id !== OWNER_ID && pass !== RESTRICT_PASSWORD) {
-            return message.reply("❌ Permission insuffisante ou mot de passe incorrect.");
+        if (pass !== RESTRICT_PASSWORD) {
+            return message.reply("❌ Mot de passe incorrect.");
         }
 
         restrictedUsers.delete(target.id);
@@ -401,6 +420,10 @@ client.on('messageCreate', async (message) => {
 
         return message.channel.send(`✅ **${target.user.tag}** n'est plus restreint.`);
     }
+
+    // ============================================================================
+    // COMMANDES COMPLÈTES (!HELP)
+    // ============================================================================
 
     // 📜 MENU AIDE
     if (message.content === '!help' || message.content === '.help') {
@@ -417,9 +440,7 @@ client.on('messageCreate', async (message) => {
                         "`!unmute @membre` • *Levée du silence*\n" +
                         "`!kick @membre [raison]` • *Expulsion du serveur*\n" +
                         "`!ban @membre [raison]` • *Bannissement définitif*\n" +
-                        "`!unban [ID_utilisateur]` • *Révoque un bannissement*\n" +
-                        "`!restrict @membre [code]` • *Bloque complètement un membre*\n" +
-                        "`!unrestrict @membre [code]` • *Débloque un membre*"
+                        "`!unban [ID_utilisateur]` • *Révoque un bannissement*"
                 },
                 {
                     name: "🚨 Gestion de Crise & Salons",
@@ -506,7 +527,7 @@ client.on('messageCreate', async (message) => {
             .setTimestamp();
 
         await sendSecurityLog(message.guild, reportEmbed);
-        return message.channel.send(`✅ Merci ${message.author}, votre signalement a été transmis à l'équipe de modération.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+        return message.channel.send(`✅ Merci ${message.author}, votre signalement a été transmitted à l'équipe de modération.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
     }
 
     // CONFIGURATION MODULES
@@ -528,9 +549,10 @@ client.on('messageCreate', async (message) => {
                     { name: "anti-spam", value: cfg.antiSpam ? '🟢 Actif' : '🔴 Inactif', inline: true },
                     { name: "anti-zalgo", value: cfg.antiZalgo ? '🟢 Actif' : '🔴 Inactif', inline: true },
                     { name: "anti-nuke", value: cfg.antiNukeStaff ? '🛡️ Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-bot", value: cfg.antiUnauthorizedBot ? '🛡️ Actif' : '🔴 Inactif', inline: true }
+                    { name: "anti-bot", value: cfg.antiUnauthorizedBot ? '🛡️ Actif' : '🔴 Inactif', inline: true },
+                    { name: "restriction", value: cfg.restrictSystem ? '🛡️ Actif' : '🔴 Inactif', inline: true }
                 )
-                .setFooter({ text: "Exemple : !config anti-spam off" });
+                .setFooter({ text: "Exemple : !config restriction off" });
             return message.reply({ embeds: [configEmbed] });
         }
 
@@ -545,6 +567,7 @@ client.on('messageCreate', async (message) => {
         else if (option === 'anti-zalgo') cfg.antiZalgo = isTrue;
         else if (option === 'anti-nuke') cfg.antiNukeStaff = isTrue;
         else if (option === 'anti-bot') cfg.antiUnauthorizedBot = isTrue;
+        else if (option === 'restriction') cfg.restrictSystem = isTrue;
         else return message.reply("⚠️ Module inconnu.");
 
         saveData();
@@ -573,7 +596,7 @@ client.on('messageCreate', async (message) => {
     if (message.content.startsWith('!setlog')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const channel = message.mentions.channels.first();
-        if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité` shadow");
+        if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité`");
         cfg.logChannelId = channel.id;
         saveData();
         return message.reply(`✅ Salon des rapports connecté avec succès à ${channel}`);
