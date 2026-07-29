@@ -1,5 +1,5 @@
 // ============================================================================
-// 🛡️ n0mit Safeguard v3.2 - Édition Securité & Niveaux de Restriction
+// 🛡️ n0mit Safeguard v3.5 - Édition Authentification Staff & Backups Persistantes
 // Écosystème n0mit CoreSystems
 // ============================================================================
 
@@ -19,35 +19,41 @@ const path = require('path');
 // 1. SERVEUR WEB KEEP-ALIVE
 // ============================================================================
 http.createServer((req, res) => {
-    res.write("n0mit Safeguard v3.2 - Online 24/7");
+    res.write("n0mit Safeguard v3.5 - Online 24/7");
     res.end();
 }).listen(process.env.PORT || 3000);
 
 // ============================================================================
-// 1.5 PERSISTANCE DES DONNÉES (SAVED ON RESTART)
+// 1.5 PERSISTANCE DES DONNÉES (FILE-BASED DATABASE)
 // ============================================================================
 const DB_FILE = path.join(__dirname, 'database.json');
 
 function loadData() {
     try {
         if (!fs.existsSync(DB_FILE)) {
-            const initialData = { guildConfigs: {}, restrictedUsers: {} };
+            const initialData = { 
+                guildConfigs: {}, 
+                restrictedUsers: {}, 
+                authenticatedStaff: [], 
+                userWarns: {}, 
+                serverBackups: {} 
+            };
             fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
             return initialData;
         }
         const data = fs.readFileSync(DB_FILE, 'utf8');
         const parsed = JSON.parse(data);
-        
-        // Rétrocompatibilité si l'ancien format d'Array était utilisé
-        if (Array.isArray(parsed.restrictedUsers)) {
-            const newMap = {};
-            parsed.restrictedUsers.forEach(id => newMap[id] = 3);
-            parsed.restrictedUsers = newMap;
-        }
-        return parsed;
+
+        return {
+            guildConfigs: parsed.guildConfigs || {},
+            restrictedUsers: parsed.restrictedUsers || {},
+            authenticatedStaff: parsed.authenticatedStaff || [],
+            userWarns: parsed.userWarns || {},
+            serverBackups: parsed.serverBackups || {}
+        };
     } catch (e) {
         console.error("Erreur de chargement de la base de données :", e);
-        return { guildConfigs: {}, restrictedUsers: {} };
+        return { guildConfigs: {}, restrictedUsers: {}, authenticatedStaff: [], userWarns: {}, serverBackups: {} };
     }
 }
 
@@ -55,7 +61,10 @@ function saveData() {
     try {
         const dataToSave = {
             guildConfigs: Object.fromEntries(guildConfigs),
-            restrictedUsers: Object.fromEntries(restrictedUsers)
+            restrictedUsers: Object.fromEntries(restrictedUsers),
+            authenticatedStaff: Array.from(authenticatedStaff),
+            userWarns: Object.fromEntries(userWarns),
+            serverBackups: Object.fromEntries(serverBackups)
         };
         fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave, null, 2));
     } catch (e) {
@@ -64,9 +73,11 @@ function saveData() {
 }
 
 const db = loadData();
-const guildConfigs = new Map(Object.entries(db.guildConfigs || {}));
-// Map: UserID -> Restriction Level (1, 2, ou 3)
-const restrictedUsers = new Map(Object.entries(db.restrictedUsers || {}));
+const guildConfigs = new Map(Object.entries(db.guildConfigs));
+const restrictedUsers = new Map(Object.entries(db.restrictedUsers));
+const authenticatedStaff = new Set(db.authenticatedStaff);
+const userWarns = new Map(Object.entries(db.userWarns));
+const serverBackups = new Map(Object.entries(db.serverBackups));
 
 // ============================================================================
 // 2. INITIALISATION & CONFIGURATION
@@ -83,12 +94,11 @@ const client = new Client({
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const OWNER_ID = "1440037449546989701"; 
-const RESTRICT_PASSWORD = "6280";
+const SECRET_PASSWORD = "6280"; // Mot de passe unifié (Restriction & Login Staff)
 const UNIFIED_CHANNEL_NAME = "📢｜n0mit-coresystems";
 
 const staffActionTracker = new Map();
 const spamTracker = new Map();
-const serverBackups = new Map();
 
 function getConfig(guildId) {
     if (!guildConfigs.has(guildId)) {
@@ -108,6 +118,10 @@ function getConfig(guildId) {
         saveData();
     }
     return guildConfigs.get(guildId);
+}
+
+function isStaffMember(userId) {
+    return userId === OWNER_ID || authenticatedStaff.has(userId);
 }
 
 async function sendSecurityLog(guild, embed) {
@@ -159,7 +173,7 @@ async function getOrCreateCoreChannel(guild) {
 // 4. MODULES DE SÉCURITÉ AUTOMATIQUES
 // ============================================================================
 
-// A. Anti-Bot Tiers & Anti-Raid Comptes Récents
+// Anti-Bot & Anti-Raid
 client.on('guildMemberAdd', async (member) => {
     const cfg = getConfig(member.guild.id);
 
@@ -194,62 +208,9 @@ client.on('guildMemberAdd', async (member) => {
     }
 });
 
-// B. Anti-Nuke Staff
-client.on('channelDelete', async (channel) => {
-    if (!channel.guild) return;
-    const cfg = getConfig(channel.guild.id);
-    if (!cfg.antiNukeStaff) return;
-
-    try {
-        const logs = await channel.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.ChannelDelete });
-        const entry = logs.entries.first();
-        if (!entry) return;
-
-        const executor = entry.executor;
-        if (executor.id === channel.guild.ownerId || executor.id === client.user.id || executor.id === OWNER_ID) return;
-
-        const key = `${channel.guild.id}_${executor.id}`;
-        const now = Date.now();
-        const userStats = staffActionTracker.get(key) || { count: 0, firstAction: now };
-
-        if (now - userStats.firstAction > 10000) {
-            userStats.count = 1;
-            userStats.firstAction = now;
-        } else {
-            userStats.count++;
-        }
-
-        staffActionTracker.set(key, userStats);
-
-        if (userStats.count >= 2) {
-            const member = await channel.guild.members.fetch(executor.id);
-            if (member) {
-                const dangerousRoles = member.roles.cache.filter(r => 
-                    r.permissions.has(PermissionFlagsBits.Administrator) || 
-                    r.permissions.has(PermissionFlagsBits.ManageChannels) ||
-                    r.permissions.has(PermissionFlagsBits.BanMembers)
-                );
-                await member.roles.remove(dangerousRoles, "Anti-Nuke Safeguard");
-
-                const nukeEmbed = new EmbedBuilder()
-                    .setTitle("💥 TENTATIVE DE NUKE INTERCEPTÉE")
-                    .setColor(0xED4245)
-                    .setDescription(`L'administrateur **${executor.tag}** a supprimé plusieurs salons consécutifs.\n🔒 **Droits administratifs révoqués en urgence.**`)
-                    .setTimestamp();
-
-                await sendSecurityLog(channel.guild, nukeEmbed);
-                const owner = await channel.guild.fetchOwner();
-                await owner.send({ embeds: [nukeEmbed] }).catch(() => {});
-            }
-        }
-    } catch (e) {}
-});
-
-// C. Ghost-Ping Detection (Correctif pour ignorer la suppression automatique de commandes)
+// Ghost-Ping Detection
 client.on('messageDelete', async (message) => {
     if (!message.guild || message.author?.bot) return;
-    
-    // Ignorer si la suppression provient d'une commande du bot
     if (message.content.startsWith('!') || message.content.startsWith('.')) return;
 
     const cfg = getConfig(message.guild.id);
@@ -273,7 +234,7 @@ client.on('messageDelete', async (message) => {
 // 5. READY ET ÉVÉNEMENTS
 // ============================================================================
 client.on('ready', () => {
-    console.log(`🛡️ n0mit Safeguard v3.2 actif pour ${client.guilds.cache.size} serveurs.`);
+    console.log(`🛡️ n0mit Safeguard v3.5 actif pour ${client.guilds.cache.size} serveurs.`);
     client.user.setActivity('Protéger le serveur | !help', { type: 3 });
 });
 
@@ -284,49 +245,56 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
     const cfg = getConfig(message.guild.id);
+    const userIsStaff = isStaffMember(message.author.id);
+    const userIsOwner = message.author.id === OWNER_ID || message.author.id === message.guild.ownerId;
 
-    // --- GESTION DES NIVEAUX DE RESTRICTION ---
+    // --- SÉCURITÉ D'AUTHENTIFICATION STAFF ---
+    if (message.content.startsWith('!stafflogin')) {
+        const pass = message.content.split(' ')[1];
+        if (pass === SECRET_PASSWORD) {
+            authenticatedStaff.add(message.author.id);
+            saveData();
+            await message.delete().catch(() => {});
+            return message.channel.send(`✅ **${message.author.tag}**, authentification Staff réussie ! Session active.`)
+                .then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
+        } else {
+            await message.delete().catch(() => {});
+            return message.channel.send(`❌ Code secret incorrect.`).then(m => setTimeout(() => m.delete().catch(() => {}), 3000));
+        }
+    }
+
+    // --- GESTION DES RESTRICTIONS DE MEMBRES ---
     if (cfg.restrictSystem && restrictedUsers.has(message.author.id)) {
         const level = restrictedUsers.get(message.author.id);
-
-        // Bypasses de sécurité pour le Owner
         const isUnrestrictCmd = message.author.id === OWNER_ID && message.content.startsWith('!unrestrict');
 
         if (!isUnrestrictCmd) {
-            // NIVEAU 3 : Aucun message autorisé
             if (level === 3) {
                 await message.delete().catch(() => {});
                 return message.channel.send(`🚫 ${message.author}, vous êtes restreint (Niveau 3 : Envoi de messages bloqué).`)
                     .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
             }
 
-            // NIVEAU 2 : Aucune commande autorisée
             if (level === 2 && (message.content.startsWith('!') || message.content.startsWith('.'))) {
                 await message.delete().catch(() => {});
                 return message.channel.send(`🚫 ${message.author}, vos commandes sont bloquées (Restriction Niveau 2).`)
                     .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
             }
 
-            // NIVEAU 1 : Commandes basiques uniquement (!help, !serverinfo, !report)
             if (level === 1 && (message.content.startsWith('!') || message.content.startsWith('.'))) {
-                const allowedCmds = ['!help', '!serverinfo', '!report'];
+                const allowedCmds = ['!help', '!serverinfo', '!report', '!stafflogin'];
                 const cmd = message.content.split(' ')[0].toLowerCase();
                 if (!allowedCmds.includes(cmd)) {
                     await message.delete().catch(() => {});
-                    return message.channel.send(`⚠️ ${message.author}, niveau de privilège restreint (Commandes basiques uniquement).`)
+                    return message.channel.send(`⚠️ ${message.author}, niveau de privilège restreint.`)
                         .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
                 }
             }
         }
     }
 
-    const isStaff = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
-    const isOwner = message.author.id === OWNER_ID || message.author.id === message.guild.ownerId;
-
-    // --- FILTRES PASSIFS ---
-
-    // 1. Anti-Spam
-    if (cfg.antiSpam && !isStaff && !isOwner) {
+    // --- FILTRES PASSIFS AUTOMATIQUES ---
+    if (cfg.antiSpam && !userIsStaff && !userIsOwner) {
         const userId = message.author.id;
         const now = Date.now();
         const userSpam = spamTracker.get(userId) || { count: 0, lastMsg: now };
@@ -345,98 +313,113 @@ client.on('messageCreate', async (message) => {
         spamTracker.set(userId, userSpam);
     }
 
-    // 2. Anti-Zalgo
-    if (cfg.antiZalgo && !isStaff && !isOwner) {
-        const zalgoRegex = /[\u0300-\u036f\u1ab0-\u1ace\u1dc0-\u1ffe\u20d0-\u20ff]/g;
-        if (zalgoRegex.test(message.content)) {
-            await message.delete().catch(() => {});
-            return message.channel.send(`⚠️ ${message.author}, les caractères altérés sont interdits.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
-        }
-    }
-
-    // 3. Anti-Invite (EXCEPTION OWNER APPLIQUÉE)
-    if (cfg.antiInvite && !isStaff && !isOwner) {
+    if (cfg.antiInvite && !userIsStaff && !userIsOwner) {
         const inviteRegex = /(discord\.(gg|me|com)|discordapp\.com\/invite)\/[a-zA-Z0-9]+/i;
         if (inviteRegex.test(message.content)) {
             await message.delete().catch(() => {});
-            return message.channel.send(`⚠️ ${message.author}, la publication d'invitations est interdite.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+            return message.channel.send(`⚠️ ${message.author}, publication d'invitation interdite.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
         }
     }
 
-    // 4. Anti-Phishing
-    if (cfg.antiPhishing && !isStaff && !isOwner) {
+    if (cfg.antiPhishing && !userIsStaff && !userIsOwner) {
         const scamRegex = /(steamcommun|discord-gift|free-nitro|steam-promo|airdrop-gift|grabify|iplogger)/i;
         if (scamRegex.test(message.content)) {
             await message.delete().catch(() => {});
             try { await message.member.timeout(30 * 60 * 1000, "Lien Phishing"); } catch(e) {}
-            return message.channel.send(`🚨 ${message.author}, tentative d'envoi de lien malveillant détectée.`);
+            return message.channel.send(`🚨 ${message.author}, tentative de phishing détectée.`);
         }
     }
 
     // ============================================================================
-    // COMMANDES DISCRÈTES / RESTREINTES
+    // SECTION : COMMANDES EXCLUSIVES STAFF (!STAFF)
     // ============================================================================
 
-    // 📜 MANUEL STAFF ET DÉTAILS DE RESTRICTION
     if (message.content === '!staff') {
-        if (!isStaff && !isOwner) return message.reply("❌ Accès réservé aux membres du Staff.");
+        if (!userIsStaff && !userIsOwner) {
+            return message.reply("🔒 Identifiez-vous d'abord avec `!stafflogin [mot_de_passe]`");
+        }
 
         const staffEmbed = new EmbedBuilder()
-            .setTitle("🔒 n0mit Safeguard - Documentation Staff")
+            .setTitle("🔒 Panneau de Contrôle Staff & Modération")
             .setColor(0x2B2D31)
-            .setDescription("Guide des commandes d'administration et du système de restriction.")
             .addFields(
                 {
-                    name: "⚙️ Système de Restriction (Multi-Niveaux)",
+                    name: "🔑 Authentification & Gestion Staff",
                     value: 
-                        "• **Niveau 1 (Soft)** : Permet uniquement `!help`, `!serverinfo` et `!report`. Bloque l'accès aux autres commandes.\n" +
-                        "• **Niveau 2 (Medium)** : Bloque l'exécution de **toutes** les commandes. L'utilisateur peut discuter normalement.\n" +
-                        "• **Niveau 3 (Hard)** : Supprime automatiquement **tous les messages** envoyés par le membre (Mute total par le bot)."
+                        "`!stafflogin [mot_de_passe]` • *Active votre session Staff*\n" +
+                        "`!stafflogout @membre` • *Révoque la session Staff d'un membre*\n" +
+                        "`!stafflist` • *Affiche la liste des sessions Staff actives*"
                 },
                 {
-                    name: "📌 Syntaxe des Commandes de Restriction",
+                    name: "🚫 Système de Restrictions (Niveaux 1 à 3)",
                     value: 
-                        "`!restrict @membre [1/2/3] [6280]` • *Applique une restriction avec le niveau voulu*\n" +
-                        "`!unrestrict @membre [6280]` • *Lève la restriction appliquée*"
+                        "`!restrict @membre [1/2/3] [6280]` • *Restreint un membre selon le niveau*\n" +
+                        "`!unrestrict @membre [6280]` • *Lève la restriction d'un membre*"
+                },
+                {
+                    name: "🛠️ Outils de Gestion & Modération Avancée",
+                    value: 
+                        "`!warnlist @membre` • *Affiche le casier d'avertissements*\n" +
+                        "`!clearwarns @membre` • *Réinitialise les avertissements*\n" +
+                        "`!tempban @membre [jours] [raison]` • *Bannissement temporaire*\n" +
+                        "`!backup` • *Sauvegarde la structure du serveur sur disque*\n" +
+                        "`!restorebackup` • *Restaure les salons depuis la sauvegarde*\n" +
+                        "`!botclean` • *Purge les messages récents du bot*"
                 }
             )
-            .setFooter({ text: "Information confidentielle de modération" });
+            .setFooter({ text: "Document confidentiel - n0mit CoreSystems" });
 
         return message.reply({ embeds: [staffEmbed] });
     }
 
-    // 🔒 APPLICATION DE LA RESTRICTION (NIVEAUX 1 À 3)
-    if (message.content.startsWith('!restrict')) {
-        if (!cfg.restrictSystem) return message.reply("❌ Le système de restriction est désactivé sur ce serveur.");
+    // DÉCONNEXION STAFF (RÉSERVÉE OWNER)
+    if (message.content.startsWith('!stafflogout')) {
+        if (message.author.id !== OWNER_ID) return message.reply("❌ Réservé au Propriétaire.");
+        const target = message.mentions.members.first();
+        if (!target) return message.reply("⚠️ Utilisation : `!stafflogout @membre`");
 
+        authenticatedStaff.delete(target.id);
+        saveData();
+        return message.reply(`✅ Session Staff révoquée pour **${target.user.tag}**.`);
+    }
+
+    // LISTE DES STAFFS AUTHENTIFIÉS
+    if (message.content === '!stafflist') {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Accès refusé.");
+        const list = Array.from(authenticatedStaff).map(id => `<@${id}>`).join("\n") || "Aucun Staff connecté.";
+        const embed = new EmbedBuilder()
+            .setTitle("🛡️ Sessions Staff Actives")
+            .setColor(0x57F287)
+            .setDescription(list);
+        return message.reply({ embeds: [embed] });
+    }
+
+    // RESTRICTION MEMBRES
+    if (message.content.startsWith('!restrict')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Authentification Staff requise (`!stafflogin`).");
         const args = message.content.split(' ');
         const target = message.mentions.members.first();
         const level = parseInt(args[2]);
         const pass = args[3];
 
         if (!target || isNaN(level) || level < 1 || level > 3) {
-            return message.reply("⚠️ Utilisation : `!restrict @membre [niveau 1-3] [mot_de_passe]`");
+            return message.reply("⚠️ Utilisation : `!restrict @membre [1-3] [6280]`");
         }
 
-        if (pass !== RESTRICT_PASSWORD) {
-            return message.reply("❌ Mot de passe de restriction incorrect.");
-        }
+        if (pass !== SECRET_PASSWORD) return message.reply("❌ Code secret incorrect.");
 
         restrictedUsers.set(target.id, level);
         saveData();
-
-        return message.channel.send(`🚫 **${target.user.tag}** a été restreint au **Niveau ${level}**.`);
+        return message.channel.send(`🚫 **${target.user.tag}** restreint au **Niveau ${level}**.`);
     }
 
-    // 🔓 LEVÉE DE LA RESTRICTION
+    // LEVÉE DE RESTRICTION
     if (message.content.startsWith('!unrestrict')) {
-        if (!cfg.restrictSystem) return message.reply("❌ Le système de restriction est désactivé sur ce serveur.");
-
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Authentification Staff requise.");
         const args = message.content.split(' ');
         const target = message.mentions.members.first();
         const pass = args[2];
 
-        // Exception Owner pour secours rapide
         if (message.author.id === OWNER_ID) {
             restrictedUsers.delete(message.author.id);
             if (target) restrictedUsers.delete(target.id);
@@ -444,27 +427,120 @@ client.on('messageCreate', async (message) => {
             return message.channel.send(`✅ Restriction levée.`);
         }
 
-        if (!target) return message.reply("⚠️ Utilisation : `!unrestrict @membre [mot_de_passe]`");
-
-        if (pass !== RESTRICT_PASSWORD) {
-            return message.reply("❌ Mot de passe incorrect.");
-        }
+        if (!target || pass !== SECRET_PASSWORD) return message.reply("❌ Syntaxe ou code secret incorrect.");
 
         restrictedUsers.delete(target.id);
         saveData();
+        return message.channel.send(`✅ Restriction levée pour **${target.user.tag}**.`);
+    }
 
-        return message.channel.send(`✅ **${target.user.tag}** n'est plus restreint.`);
+    // SAUVEGARDE SUR DISQUE PERSISTANTE
+    if (message.content === '!backup') {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Authentification Staff requise.");
+
+        const channelsData = message.guild.channels.cache.map(c => ({
+            name: c.name,
+            type: c.type,
+            parentId: c.parentId
+        }));
+
+        serverBackups.set(message.guild.id, {
+            date: new Date().toISOString(),
+            channels: channelsData
+        });
+
+        saveData();
+
+        const backupEmbed = new EmbedBuilder()
+            .setTitle("💾 Sauvegarde Enregistrée sur Disque")
+            .setColor(0x57F287)
+            .setDescription(`Structure de **${channelsData.length} salons** sauvegardée avec succès. Résiste aux redémarrages !`);
+
+        return message.reply({ embeds: [backupEmbed] });
+    }
+
+    // RESTAURATION DE LA STRUCTURE
+    if (message.content === '!restorebackup') {
+        if (!userIsOwner) return message.reply("❌ Action critique : réservée au propriétaire.");
+        const backup = serverBackups.get(message.guild.id);
+        if (!backup) return message.reply("❌ Aucune sauvegarde trouvée pour ce serveur.");
+
+        message.reply("🔄 Restauration de la structure en cours...");
+
+        for (const ch of backup.channels) {
+            const exists = message.guild.channels.cache.find(c => c.name === ch.name);
+            if (!exists) {
+                await message.guild.channels.create({ name: ch.name, type: ch.type }).catch(() => {});
+            }
+        }
+
+        return message.channel.send("✅ **Restauration terminée !** La structure des salons a été reconstituée.");
+    }
+
+    // LISTE DES WARNS
+    if (message.content.startsWith('!warnlist')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Accès refusé.");
+        const target = message.mentions.members.first();
+        if (!target) return message.reply("⚠️ Utilisation : `!warnlist @membre`");
+
+        const warns = userWarns.get(target.id) || [];
+        const warnEmbed = new EmbedBuilder()
+            .setTitle(`📜 Casier Avertissements : ${target.user.tag}`)
+            .setColor(0xFEE75C)
+            .setDescription(warns.length ? warns.map((w, i) => `**${i + 1}.** ${w.reason} *(par ${w.by})*`).join("\n") : "✅ Aucun avertissement enregistré.");
+
+        return message.reply({ embeds: [warnEmbed] });
+    }
+
+    // CLEAR WARNS
+    if (message.content.startsWith('!clearwarns')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Accès refusé.");
+        const target = message.mentions.members.first();
+        if (!target) return message.reply("⚠️ Utilisation : `!clearwarns @membre`");
+
+        userWarns.delete(target.id);
+        saveData();
+        return message.reply(`🧹 Casier réinitialisé pour **${target.user.tag}**.`);
+    }
+
+    // BAN TEMPORAIRE
+    if (message.content.startsWith('!tempban')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Accès refusé.");
+        const args = message.content.split(' ');
+        const target = message.mentions.members.first();
+        const days = parseInt(args[2]);
+        const reason = args.slice(3).join(' ') || "Ban temporaire";
+
+        if (!target || isNaN(days)) return message.reply("⚠️ Utilisation : `!tempban @membre [jours] [raison]`");
+
+        await target.ban({ reason });
+        message.channel.send(`🔨 **${target.user.tag}** banni temporairement pour **${days} jours**.`);
+
+        setTimeout(async () => {
+            await message.guild.members.unban(target.id).catch(() => {});
+        }, days * 24 * 60 * 60 * 1000);
+
+        return;
+    }
+
+    // BOT CLEAN (EFFACE LES MESSAGES DU BOT)
+    if (message.content === '!botclean') {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Accès refusé.");
+        const msgs = await message.channel.messages.fetch({ limit: 50 });
+        const botMsgs = msgs.filter(m => m.author.id === client.user.id);
+        await message.channel.bulkDelete(botMsgs, true);
+        return message.channel.send("🧹 Nettoyage des messages du bot effectué.").then(m => setTimeout(() => m.delete().catch(() => {}), 3000));
     }
 
     // ============================================================================
-    // COMMANDES PUBLIQUES (!HELP)
+    // SECTION : COMMANDES PUBLIQUES (!HELP)
     // ============================================================================
 
     if (message.content === '!help' || message.content === '.help') {
         const helpEmbed = new EmbedBuilder()
             .setTitle("🛡️ Centre de Contrôle n0mit Safeguard")
             .setColor(0x5865F2)
-            .setDescription("Guide complet des fonctionnalités de sécurité et de modération.")
+            .setDescription("Guide des fonctionnalités publiques de sécurité.")
             .addFields(
                 {
                     name: "🛠️ Modération & Sanctions",
@@ -473,76 +549,57 @@ client.on('messageCreate', async (message) => {
                         "`!mute @membre [min] [raison]` • *Exclusion temporaire*\n" +
                         "`!unmute @membre` • *Levée du silence*\n" +
                         "`!kick @membre [raison]` • *Expulsion du serveur*\n" +
-                        "`!ban @membre [raison]` • *Bannissement définitif*\n" +
-                        "`!unban [ID_utilisateur]` • *Révoque un bannissement*"
+                        "`!ban @membre [raison]` • *Bannissement définitif*"
                 },
                 {
-                    name: "🚨 Gestion de Crise & Salons",
+                    name: "🚨 Gestion de Salons & Utilitaires",
                     value: 
-                        "`!lockdown on/off` • *Verrouille ou déverrouille le salon*\n" +
-                        "`!slowmode [secondes]` • *Ajuste le mode lent du salon*\n" +
-                        "`!clear [1-100]` • *Supprime un volume de messages récents*\n" +
-                        "`!purgeuser @membre [1-100]` • *Supprime les messages d'un compte spécifique*\n" +
-                        "`!nuke` • *Recommence le salon à neuf (Admin)*"
-                },
-                {
-                    name: "⚙️ Sécurité & Backups",
-                    value: 
-                        "`!secscore` • *Audit et note de sécurité du serveur /100*\n" +
-                        "`!config` • *Affiche et gère l'état de tous les modules*\n" +
-                        "`!antiraid on/off` • *Quarantaine automatique des comptes récents*\n" +
-                        "`!backup` • *Sauvegarde la structure des salons du serveur*\n" +
-                        "`!report @membre [raison]` • *Signale un membre aux modérateurs*\n" +
-                        "`!setlog #salon` • *Définit le salon de réception des alertes*\n" +
-                        "`!serverinfo` • *Affiche les informations générales du serveur*"
+                        "`!lockdown on/off` • *Verrouille le salon*\n" +
+                        "`!slowmode [secondes]` • *Ajuste le mode lent*\n" +
+                        "`!clear [1-100]` • *Supprime un volume de messages*\n" +
+                        "`!report @membre [raison]` • *Signale un utilisateur au staff*\n" +
+                        "`!serverinfo` • *Affiche les informations générales*"
                 }
             )
-            .setFooter({ text: "Écosystème n0mit CoreSystems • Protection Haute Disponibilité" })
-            .setTimestamp();
+            .setFooter({ text: "n0mit CoreSystems • Authentification staff requise via !stafflogin" });
 
         return message.reply({ embeds: [helpEmbed] });
     }
 
-    // AUDIT SÉCURITÉ
-    if (message.content === '!secscore') {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        let score = 100;
-        const recommendations = [];
+    // AVERTISSEMENT REGISTRE
+    if (message.content.startsWith('!warn')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Identification Staff requise (`!stafflogin`).");
+        const member = message.mentions.members.first();
+        if (!member) return message.reply("⚠️ Utilisation : `!warn @membre [raison]`");
+        const reason = message.content.split(' ').slice(2).join(' ') || "Aucune raison";
 
-        if (message.guild.roles.everyone.permissions.has(PermissionFlagsBits.MentionEveryone)) {
-            score -= 25;
-            recommendations.push("❌ Retirez la permission `@everyone` de mentionner tout le monde.");
-        }
-        if (!cfg.logChannelId) {
-            score -= 15;
-            recommendations.push("⚠️ Configurez un salon de logs (`!setlog #salon`).");
-        }
+        const currentWarns = userWarns.get(member.id) || [];
+        currentWarns.push({ reason, by: message.author.tag, date: new Date().toLocaleDateString() });
+        userWarns.set(member.id, currentWarns);
+        saveData();
 
-        const color = score >= 80 ? 0x57F287 : 0xED4245;
-        const scoreEmbed = new EmbedBuilder()
-            .setTitle(`📊 Audit de Sécurité : ${message.guild.name}`)
-            .setColor(color)
-            .setDescription(`**Score de Sécurité : ${score}/100**\n\n` + (recommendations.length ? recommendations.join("\n") : "✅ Instance parfaitement sécurisée !"));
-
-        return message.reply({ embeds: [scoreEmbed] });
+        return message.channel.send(`⚠️ **AVERTISSEMENT** : ${member} a reçu un avertissement (Total : ${currentWarns.length}). Raison : *${reason}*`);
     }
 
-    // SAUVEGARDE DU SERVEUR
-    if (message.content === '!backup') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
-
-        const channelsData = message.guild.channels.cache.map(c => ({ name: c.name, type: c.type }));
-        serverBackups.set(message.guild.id, { timestamp: new Date(), channels: channelsData });
-
-        const backupEmbed = new EmbedBuilder()
-            .setTitle("📦 Sauvegarde Effectuée")
-            .setColor(0x57F287)
-            .setDescription(`La structure actuelle de **${channelsData.length} salons** a été sauvegardée avec succès.`);
-
-        return message.reply({ embeds: [backupEmbed] });
+    // AUTRES COMMANDES DE GESTION
+    if (message.content.startsWith('!slowmode')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Identification Staff requise.");
+        const seconds = parseInt(message.content.split(' ')[1]);
+        if (isNaN(seconds)) return message.reply("⚠️ Utilisation : `!slowmode [secondes]`");
+        await message.channel.setRateLimitPerUser(seconds);
+        return message.channel.send(`⏱️ Mode lent ajusté à **${seconds}s**.`);
     }
 
-    // SIGNALEMENT MEMBRE (SANS DÉCLENCHER DE GHOST PING)
+    if (message.content.startsWith('!clear')) {
+        if (!userIsStaff && !userIsOwner) return message.reply("❌ Identification Staff requise.");
+        const count = parseInt(message.content.split(' ')[1]);
+        if (isNaN(count) || count < 1 || count > 100) return message.reply("⚠️ Utilisation : `!clear [1-100]`");
+        await message.delete().catch(() => {});
+        const deleted = await message.channel.bulkDelete(count, true);
+        const msg = await message.channel.send(`🧹 **${deleted.size}** messages nettoyés.`);
+        setTimeout(() => msg.delete().catch(() => {}), 3000);
+    }
+
     if (message.content.startsWith('!report')) {
         const member = message.mentions.members.first();
         const reason = message.content.split(' ').slice(2).join(' ');
@@ -561,219 +618,11 @@ client.on('messageCreate', async (message) => {
             .setTimestamp();
 
         await sendSecurityLog(message.guild, reportEmbed);
-        return message.channel.send(`✅ Merci ${message.author}, votre signalement a été transmis à l'équipe.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
-    }
-
-    // CONFIGURATION DES MODULES
-    if (message.content.startsWith('!config')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const args = message.content.split(' ');
-        const option = args[1]?.toLowerCase();
-        const state = args[2]?.toLowerCase();
-
-        if (!option) {
-            const configEmbed = new EmbedBuilder()
-                .setTitle("⚙️ Configuration Safeguard v3.2")
-                .setColor(0x2B2D31)
-                .addFields(
-                    { name: "anti-invite", value: cfg.antiInvite ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-phishing", value: cfg.antiPhishing ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-everyone", value: cfg.antiEveryone ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-ghostping", value: cfg.antiGhostPing ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-spam", value: cfg.antiSpam ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-zalgo", value: cfg.antiZalgo ? '🟢 Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-nuke", value: cfg.antiNukeStaff ? '🛡️ Actif' : '🔴 Inactif', inline: true },
-                    { name: "anti-bot", value: cfg.antiUnauthorizedBot ? '🛡️ Actif' : '🔴 Inactif', inline: true },
-                    { name: "restriction", value: cfg.restrictSystem ? '🛡️ Actif' : '🔴 Inactif', inline: true }
-                )
-                .setFooter({ text: "Exemple : !config restriction off" });
-            return message.reply({ embeds: [configEmbed] });
-        }
-
-        if (state !== 'on' && state !== 'off') return message.reply("⚠️ Spécifiez `on` ou `off`.");
-        const isTrue = state === 'on';
-
-        if (option === 'anti-invite') cfg.antiInvite = isTrue;
-        else if (option === 'anti-phishing') cfg.antiPhishing = isTrue;
-        else if (option === 'anti-everyone') cfg.antiEveryone = isTrue;
-        else if (option === 'anti-ghostping') cfg.antiGhostPing = isTrue;
-        else if (option === 'anti-spam') cfg.antiSpam = isTrue;
-        else if (option === 'anti-zalgo') cfg.antiZalgo = isTrue;
-        else if (option === 'anti-nuke') cfg.antiNukeStaff = isTrue;
-        else if (option === 'anti-bot') cfg.antiUnauthorizedBot = isTrue;
-        else if (option === 'restriction') cfg.restrictSystem = isTrue;
-        else return message.reply("⚠️ Module inconnu.");
-
-        saveData();
-        return message.reply(`✅ Module **${option}** passé sur **${state.toUpperCase()}**.`);
-    }
-
-    // ANTI-RAID
-    if (message.content.startsWith('!antiraid')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
-        const state = message.content.split(' ')[1]?.toLowerCase();
-
-        if (state === 'on') {
-            cfg.antiRaid = true;
-            saveData();
-            return message.channel.send("🚨 **ANTI-RAID ACTIVÉ.** Les comptes de moins de 24h seront mis en quarantaine.");
-        } else if (state === 'off') {
-            cfg.antiRaid = false;
-            saveData();
-            return message.channel.send("✅ **ANTI-RAID DÉSACTIVÉ.** Arrivées normales rétablies.");
-        } else {
-            return message.reply("Utilisation : `!antiraid on` ou `!antiraid off`");
-        }
-    }
-
-    // LOG CHANNEL
-    if (message.content.startsWith('!setlog')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const channel = message.mentions.channels.first();
-        if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité`");
-        cfg.logChannelId = channel.id;
-        saveData();
-        return message.reply(`✅ Salon des rapports connecté avec succès à ${channel}`);
-    }
-
-    // PURGE USER
-    if (message.content.startsWith('!purgeuser')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const targetMember = message.mentions.members.first();
-        const limit = parseInt(message.content.split(' ')[2]) || 50;
-        if (!targetMember) return message.reply("⚠️ Utilisation : `!purgeuser @membre [1-100]`");
-
-        try {
-            await message.delete().catch(() => {});
-            const messages = await message.channel.messages.fetch({ limit: 100 });
-            const userMessages = messages.filter(m => m.author.id === targetMember.id).first(limit);
-            await message.channel.bulkDelete(userMessages, true);
-            const msg = await message.channel.send(`🧹 **${userMessages.length}** messages de ${targetMember} nettoyés.`);
-            setTimeout(() => msg.delete().catch(() => {}), 3000);
-        } catch (e) {
-            return message.reply("❌ Erreur lors du nettoyage.");
-        }
-    }
-
-    // MODÉRATION CLASSIQUE
-    if (message.content.startsWith('!warn')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!warn @membre [raison]`");
-        const reason = message.content.split(' ').slice(2).join(' ') || "Aucune raison";
-        return message.channel.send(`⚠️ **AVERTISSEMENT** : ${member} a reçu un avertissement. Raison : *${reason}*`);
-    }
-
-    if (message.content.startsWith('!slowmode')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) return message.reply("❌ Permission insuffisante.");
-        const seconds = parseInt(message.content.split(' ')[1]);
-        if (isNaN(seconds) || seconds < 0 || seconds > 21600) return message.reply("⚠️ Utilisation : `!slowmode [secondes]`");
-        await message.channel.setRateLimitPerUser(seconds);
-        return message.channel.send(`⏱️ Mode lent ajusté à **${seconds}s**.`);
-    }
-
-    if (message.content.startsWith('!lockdown')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
-        const state = message.content.split(' ')[1]?.toLowerCase();
-        if (state === 'on') {
-            await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: false });
-            return message.channel.send("🚨 **SALON VERROUILLÉ.**");
-        } else if (state === 'off') {
-            await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, { SendMessages: null });
-            return message.channel.send("✅ **SALON DÉVERROUILLÉ.**");
-        } else {
-            return message.reply("Utilisation : `!lockdown on` ou `!lockdown off`");
-        }
-    }
-
-    if (message.content.startsWith('!mute')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return message.reply("❌ Permission insuffisante.");
-        const args = message.content.split(' ');
-        const member = message.mentions.members.first();
-        const duration = parseInt(args[2]);
-        if (!member || isNaN(duration)) return message.reply("⚠️ Utilisation : `!mute @membre [minutes] [raison]`");
-        await member.timeout(duration * 60 * 1000, args.slice(3).join(' ') || "Aucune raison");
-        return message.channel.send(`🔇 **${member.user.tag}** est muet pendant ${duration} min.`);
-    }
-
-    if (message.content.startsWith('!unmute')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!unmute @membre`");
-        await member.timeout(null);
-        return message.channel.send(`🔊 La sanction de **${member.user.tag}** a été levée.`);
-    }
-
-    if (message.content.startsWith('!kick')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!kick @membre [raison]`");
-        await member.kick(message.content.split(' ').slice(2).join(' ') || "Aucune raison");
-        return message.channel.send(`👢 **${member.user.tag}** a été expulsé.`);
-    }
-
-    if (message.content.startsWith('!ban')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return message.reply("❌ Permission insuffisante.");
-        const member = message.mentions.members.first();
-        if (!member) return message.reply("⚠️ Utilisation : `!ban @membre [raison]`");
-        await member.ban({ reason: message.content.split(' ').slice(2).join(' ') || "Aucune raison" });
-        return message.channel.send(`🔨 **${member.user.tag}** a été banni.`);
-    }
-
-    if (message.content.startsWith('!unban')) {
-        if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return message.reply("❌ Permission insuffisante.");
-        const userId = message.content.split(' ')[1];
-        if (!userId) return message.reply("⚠️ Utilisation : `!unban [ID_utilisateur]`");
-        await message.guild.members.unban(userId);
-        return message.channel.send(`✅ ID \`${userId}\` débanni.`);
-    }
-
-    if (message.content.startsWith('!clear')) {
-        if (!isStaff) return message.reply("❌ Permission insuffisante.");
-        const count = parseInt(message.content.split(' ')[1]);
-        if (isNaN(count) || count < 1 || count > 100) return message.reply("⚠️ Utilisation : `!clear [1-100]`");
-        await message.delete().catch(() => {});
-        const deleted = await message.channel.bulkDelete(count, true);
-        const msg = await message.channel.send(`🧹 **${deleted.size}** messages nettoyés.`);
-        setTimeout(() => msg.delete().catch(() => {}), 3000);
-    }
-
-    if (message.content === '!nuke') {
-        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
-        const pos = message.channel.position;
-        const newChannel = await message.channel.clone();
-        await message.channel.delete();
-        await newChannel.setPosition(pos);
-        return newChannel.send("💥 **SALON RÉINITIALISÉ.**");
+        return message.channel.send(`✅ Signalement transmis à l'équipe.`).then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
     }
 
     if (message.content === '!serverinfo') {
         return message.reply(`📊 **${message.guild.name}**\n• Propriétaire : <@${message.guild.ownerId}>\n• Membres : \`${message.guild.memberCount}\`\n• Créé le : \`${message.guild.createdAt.toLocaleDateString()}\``);
-    }
-
-    // COMMANDE DISCRÈTE PROPRIÉTAIRE (DIFFUSION)
-    if (message.content.startsWith('!broadcast')) {
-        if (message.author.id !== OWNER_ID) return;
-        const announcement = message.content.split(' ').slice(1).join(' ');
-        if (!announcement) return message.reply("⚠️ Utilisation : `!broadcast [texte]`");
-
-        let successCount = 0;
-        const broadEmbed = new EmbedBuilder()
-            .setTitle("📢 COMMUNIQUÉ OFFICIEL n0mit CoreSystems")
-            .setColor(0x5865F2)
-            .setDescription(announcement)
-            .setTimestamp();
-
-        for (const guild of client.guilds.cache.values()) {
-            try {
-                const targetChannel = await getOrCreateCoreChannel(guild);
-                if (targetChannel) {
-                    await targetChannel.send({ embeds: [broadEmbed] });
-                    successCount++;
-                }
-            } catch (err) {}
-        }
-        return message.channel.send(`✅ Message diffusé sur **${successCount}** instances.`);
     }
 });
 
