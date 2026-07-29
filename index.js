@@ -12,6 +12,8 @@ const {
     AuditLogEvent 
 } = require('discord.js');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
 // ============================================================================
 // 1. SERVEUR WEB KEEP-ALIVE
@@ -20,6 +22,42 @@ http.createServer((req, res) => {
     res.write("n0mit Safeguard v3.0 - Online 24/7");
     res.end();
 }).listen(process.env.PORT || 3000);
+
+// ============================================================================
+// 1.5 PERSISTANCE DES DONNÉES (RENDER RESTARTS FIX)
+// ============================================================================
+const DB_FILE = path.join(__dirname, 'database.json');
+
+function loadData() {
+    try {
+        if (!fs.existsSync(DB_FILE)) {
+            const initialData = { guildConfigs: {}, restrictedUsers: [] };
+            fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2));
+            return initialData;
+        }
+        const data = fs.readFileSync(DB_FILE, 'utf8');
+        return JSON.parse(data);
+    } catch (e) {
+        console.error("Erreur de chargement de la base de données :", e);
+        return { guildConfigs: {}, restrictedUsers: [] };
+    }
+}
+
+function saveData() {
+    try {
+        const dataToSave = {
+            guildConfigs: Object.fromEntries(guildConfigs),
+            restrictedUsers: Array.from(restrictedUsers)
+        };
+        fs.writeFileSync(DB_FILE, JSON.stringify(dataToSave, null, 2));
+    } catch (e) {
+        console.error("Erreur de sauvegarde de la base de données :", e);
+    }
+}
+
+const db = loadData();
+const guildConfigs = new Map(Object.entries(db.guildConfigs || {}));
+const restrictedUsers = new Set(db.restrictedUsers || []);
 
 // ============================================================================
 // 2. INITIALISATION & CONFIGURATION
@@ -36,9 +74,9 @@ const client = new Client({
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const OWNER_ID = "1440037449546989701"; 
+const RESTRICT_PASSWORD = "6280";
 const UNIFIED_CHANNEL_NAME = "📢｜n0mit-coresystems";
 
-const guildConfigs = new Map();
 const staffActionTracker = new Map();
 const spamTracker = new Map();
 const serverBackups = new Map(); // Stockage mémoire des sauvegardes
@@ -57,6 +95,7 @@ function getConfig(guildId) {
             antiZalgo: true,
             logChannelId: null
         });
+        saveData();
     }
     return guildConfigs.get(guildId);
 }
@@ -263,6 +302,13 @@ client.on('guildCreate', async (guild) => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
+    // --- VÉRIFICATION RESTRICTION ---
+    if (restrictedUsers.has(message.author.id)) {
+        await message.delete().catch(() => {});
+        return message.channel.send(`🚫 ${message.author}, vous êtes actuellement restreint. Vos actions sont bloquées.`)
+            .then(m => setTimeout(() => m.delete().catch(() => {}), 4000));
+    }
+
     const cfg = getConfig(message.guild.id);
     const isStaff = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
 
@@ -320,6 +366,42 @@ client.on('messageCreate', async (message) => {
     // COMMANDES COMPLÈTES (!HELP)
     // ============================================================================
 
+    // 🔒 RESTRICTION D'UN MEMBRE
+    if (message.content.startsWith('!restrict')) {
+        const args = message.content.split(' ');
+        const target = message.mentions.members.first();
+        const pass = args[2];
+
+        if (!target) return message.reply("⚠️ Utilisation : `!restrict @membre [mot_de_passe]`");
+
+        if (message.author.id !== OWNER_ID && pass !== RESTRICT_PASSWORD) {
+            return message.reply("❌ Permission insuffisante ou mot de passe incorrect.");
+        }
+
+        restrictedUsers.add(target.id);
+        saveData();
+
+        return message.channel.send(`🚫 **${target.user.tag}** a été ajouté à la liste des utilisateurs restreints.`);
+    }
+
+    // 🔓 LEVÉE DE LA RESTRICTION
+    if (message.content.startsWith('!unrestrict')) {
+        const args = message.content.split(' ');
+        const target = message.mentions.members.first();
+        const pass = args[2];
+
+        if (!target) return message.reply("⚠️ Utilisation : `!unrestrict @membre [mot_de_passe]`");
+
+        if (message.author.id !== OWNER_ID && pass !== RESTRICT_PASSWORD) {
+            return message.reply("❌ Permission insuffisante ou mot de passe incorrect.");
+        }
+
+        restrictedUsers.delete(target.id);
+        saveData();
+
+        return message.channel.send(`✅ **${target.user.tag}** n'est plus restreint.`);
+    }
+
     // 📜 MENU AIDE
     if (message.content === '!help' || message.content === '.help') {
         const helpEmbed = new EmbedBuilder()
@@ -335,7 +417,9 @@ client.on('messageCreate', async (message) => {
                         "`!unmute @membre` • *Levée du silence*\n" +
                         "`!kick @membre [raison]` • *Expulsion du serveur*\n" +
                         "`!ban @membre [raison]` • *Bannissement définitif*\n" +
-                        "`!unban [ID_utilisateur]` • *Révoque un bannissement*"
+                        "`!unban [ID_utilisateur]` • *Révoque un bannissement*\n" +
+                        "`!restrict @membre [code]` • *Bloque complètement un membre*\n" +
+                        "`!unrestrict @membre [code]` • *Débloque un membre*"
                 },
                 {
                     name: "🚨 Gestion de Crise & Salons",
@@ -463,6 +547,7 @@ client.on('messageCreate', async (message) => {
         else if (option === 'anti-bot') cfg.antiUnauthorizedBot = isTrue;
         else return message.reply("⚠️ Module inconnu.");
 
+        saveData();
         return message.reply(`✅ Module **${option}** passé sur **${state.toUpperCase()}**.`);
     }
 
@@ -473,9 +558,11 @@ client.on('messageCreate', async (message) => {
 
         if (state === 'on') {
             cfg.antiRaid = true;
+            saveData();
             return message.channel.send("🚨 **ANTI-RAID ACTIVÉ.** Les comptes de moins de 24h seront mis en quarantaine.");
         } else if (state === 'off') {
             cfg.antiRaid = false;
+            saveData();
             return message.channel.send("✅ **ANTI-RAID DÉSACTIVÉ.** Arrivées normales rétablies.");
         } else {
             return message.reply("Utilisation : `!antiraid on` ou `!antiraid off`");
@@ -486,8 +573,9 @@ client.on('messageCreate', async (message) => {
     if (message.content.startsWith('!setlog')) {
         if (!isStaff) return message.reply("❌ Permission insuffisante.");
         const channel = message.mentions.channels.first();
-        if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité`");
+        if (!channel) return message.reply("⚠️ Mentionnez un salon. Exemple : `!setlog #logs-sécurité` shadow");
         cfg.logChannelId = channel.id;
+        saveData();
         return message.reply(`✅ Salon des rapports connecté avec succès à ${channel}`);
     }
 
