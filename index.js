@@ -1,5 +1,5 @@
 // ============================================================================
-// 🛡️ n0mit Safeguard v3.0 - Édition Utile & Incontournable (Staff & Anti-Conflit Edition)
+// 🛡️ n0mit Safeguard v3.0 - Édition Intégrale Unifiée
 // Écosystème n0mit CoreSystems
 // ============================================================================
 
@@ -19,12 +19,12 @@ const path = require('path');
 // 1. SERVEUR WEB KEEP-ALIVE
 // ============================================================================
 http.createServer((req, res) => {
-    res.write("n0mit Safeguard v3.0 - Online 24/7");
+    res.write("n0mit Safeguard v3.0 - Operational 24/7");
     res.end();
 }).listen(process.env.PORT || 3000);
 
 // ============================================================================
-// 1.5 PERSISTANCE DES DONNÉES (RENDER RESTARTS FIX)
+// 1.5 PERSISTANCE DES DONNÉES (PERSISTENCE LOCALE)
 // ============================================================================
 const DB_FILE = path.join(__dirname, 'database.json');
 
@@ -59,7 +59,7 @@ function saveData() {
 const db = loadData();
 const guildConfigs = new Map(Object.entries(db.guildConfigs || {}));
 const restrictedUsers = new Set(db.restrictedUsers || []);
-const devStaff = new Set(db.devStaff || []); // Membres de l'équipe de développement du bot
+const devStaff = new Set(db.devStaff || []);
 
 // ============================================================================
 // 2. INITIALISATION & CONFIGURATION
@@ -78,6 +78,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const OWNER_ID = "1440037449546989701"; 
 const RESTRICT_PASSWORD = "6280"; // Mot de passe Staff Dev Bot
 const UNIFIED_CHANNEL_NAME = "📢｜n0mit-coresystems";
+const SUPPORT_SERVER_LINK = "https://discord.gg/n0mit"; // Lien du serveur principal / hub
 
 const staffActionTracker = new Map();
 const spamTracker = new Map();
@@ -119,7 +120,7 @@ async function sendSecurityLog(guild, embed) {
 }
 
 // ============================================================================
-// 3. SYNCHRONISATION SALON UNIFIÉ
+// 3. SYNCHRONISATION SALON UNIFIÉ (AVEC PERMISSIONS PROPRIÉTAIRE)
 // ============================================================================
 async function getOrCreateCoreChannel(guild) {
     try {
@@ -132,16 +133,29 @@ async function getOrCreateCoreChannel(guild) {
             channel = await guild.channels.create({
                 name: UNIFIED_CHANNEL_NAME,
                 type: ChannelType.GuildText,
-                topic: "Annonces et informations système officielles de n0mit CoreSystems.",
+                topic: `Annonces et informations système officielles de n0mit CoreSystems. Hub : ${SUPPORT_SERVER_LINK}`,
                 permissionOverwrites: [
                     {
+                        // Tout le monde : lecture seule
                         id: guild.roles.everyone.id,
                         deny: [PermissionFlagsBits.SendMessages],
                         allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]
                     },
                     {
+                        // Le Bot : droits d'envoi
                         id: guild.members.me.id,
-                        allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.ViewChannel, PermissionFlagsBits.EmbedLinks]
+                        allow: [PermissionFlagsBits.SendMessages, PermissionFlagsBits.ViewChannel, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ManageChannels]
+                    },
+                    {
+                        // Le Propriétaire du Serveur (Owner) : Accès et contrôle total
+                        id: guild.ownerId,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel, 
+                            PermissionFlagsBits.SendMessages, 
+                            PermissionFlagsBits.ManageMessages, 
+                            PermissionFlagsBits.ManageChannels, 
+                            PermissionFlagsBits.ReadMessageHistory
+                        ]
                     }
                 ]
             });
@@ -159,6 +173,7 @@ client.on('channelCreate', async (channel) => {
             .setTitle("🔗 n0mit CoreSystems Sync")
             .setColor(0x2B2D31)
             .setDescription("Liaison réussie entre **n0mit Safeguard** et le salon système.")
+            .setFooter({ text: `n0mit CoreSystems • ${SUPPORT_SERVER_LINK}` })
             .setTimestamp();
 
         await channel.send({ embeds: [embed] }).catch(() => {});
@@ -280,7 +295,8 @@ client.on('messageDelete', async (message) => {
 // ============================================================================
 client.on('ready', () => {
     console.log(`🛡️ n0mit Safeguard v3.0 actif pour ${client.guilds.cache.size} serveurs.`);
-    client.user.setActivity('Protéger le serveur | !help | n!help', { type: 3 });
+    // Statut mis à jour avec la marque n0mit CoreSystems
+    client.user.setActivity('n0mit CoreSystems | !help', { type: 3 });
 });
 
 client.on('guildCreate', async (guild) => {
@@ -295,9 +311,9 @@ client.on('guildCreate', async (guild) => {
             .addFields(
                 { name: "🛡️ Anti-Nuke Staff", value: "Neutralise les modérateurs malveillants.", inline: true },
                 { name: "⚡ Anti-Spam & Zalgo", value: "Filtre les caractères toxiques et le spam.", inline: true },
-                { name: "📦 Sauvegarde Express", value: "`!backup` pour sécuriser vos salons.", inline: true }
+                { name: "📦 Structure & Config", value: "Commandes `!backup` et `!config` à disposition.", inline: true }
             )
-            .setFooter({ text: "Tapez !help pour consulter la liste des commandes." });
+            .setFooter({ text: `n0mit CoreSystems • Hub : ${SUPPORT_SERVER_LINK} • Tapez !help` });
 
         await targetChannel.send({ embeds: [welcomeEmbed] });
     } catch (err) {}
@@ -307,7 +323,6 @@ client.on('guildCreate', async (guild) => {
 // 6. GESTION DES MESSAGES & COMMANDES
 // ============================================================================
 client.on('messageCreate', async (message) => {
-    // Ignore les messages provenant de bots (empêche les boucles et conflits avec RaidProtect)
     if (message.author.bot || !message.guild) return;
 
     let rawContent = message.content.trim();
@@ -398,7 +413,8 @@ client.on('messageCreate', async (message) => {
 
         if (!inputPassword || inputPassword !== RESTRICT_PASSWORD) {
             await message.delete().catch(() => {});
-            return message.channel.send(`🔒 **Accès Développeur Bot** : Veuillez fournir le mot de passe secret.\nExemple : \`${usedPrefix}staff 6280\``)
+            // SÉCURITÉ : Le mot de passe n'est plus révélé dans l'exemple !
+            return message.channel.send(`🔒 **Accès Développeur Bot** : Veuillez fournir le mot de passe secret.\nExemple : \`${usedPrefix}staff [code_secret]\``)
                 .then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
         }
 
@@ -411,10 +427,10 @@ client.on('messageCreate', async (message) => {
             .setColor(0xED4245)
             .setDescription(`Bienvenue **${message.author.tag}**. Authentification réussie.`)
             .addFields(
-                { name: "🚫 Modération Bot Global", value: `\`${usedPrefix}restrict @membre 6280\` • *Restreindre un membre*\n\`${usedPrefix}unrestrict @membre 6280\` • *Enlever la restriction*` },
-                { name: "📢 Diffusions & Debug", value: `\`${usedPrefix}broadcast [message]\` • *Annonce globale à toutes les instances*` }
+                { name: "🚫 Modération Bot Global", value: `\`${usedPrefix}restrict @membre [code]\` • *Restreindre un membre*\n\`${usedPrefix}unrestrict @membre [code]\` • *Enlever la restriction*` },
+                { name: "📢 Diffusions & Debug", value: `\`${usedPrefix}broadcast [message]\` • *Annonce globale (Owner uniquement)*` }
             )
-            .setFooter({ text: "Session Staff Bot Active" });
+            .setFooter({ text: `Session Staff Bot Active • Hub : ${SUPPORT_SERVER_LINK}` });
 
         return message.channel.send({ embeds: [devEmbed] });
     }
@@ -464,9 +480,12 @@ client.on('messageCreate', async (message) => {
         return message.channel.send(`✅ **${target.user.tag}** n'est plus restreint.`);
     }
 
-    // COMMANDE CACHÉE DÉVELOPPEUR (BROADCAST)
+    // 📢 COMMANDE DIFFUSION (STRICTEMENT RÉSERVÉE À L'OWNER DU BOT)
     if (command === 'broadcast') {
-        if (!isBotDev(message.author.id)) return;
+        if (message.author.id !== OWNER_ID) {
+            return message.reply("❌ Seul le propriétaire principal du bot (Owner) peut exécuter cette commande.");
+        }
+        
         const announcement = args.join(' ');
         if (!announcement) return message.reply(`⚠️ Utilisation : \`${usedPrefix}broadcast [texte]\``);
 
@@ -475,6 +494,7 @@ client.on('messageCreate', async (message) => {
             .setTitle("📢 COMMUNIQUÉ OFFICIEL n0mit CoreSystems")
             .setColor(0x5865F2)
             .setDescription(announcement)
+            .setFooter({ text: `n0mit CoreSystems • ${SUPPORT_SERVER_LINK}` })
             .setTimestamp();
 
         for (const guild of client.guilds.cache.values()) {
@@ -525,13 +545,13 @@ client.on('messageCreate', async (message) => {
                         "`!secscore` • *Audit et note de sécurité du serveur /100*\n" +
                         "`!config` • *Affiche et gère l'état de tous les modules*\n" +
                         "`!antiraid on/off` • *Quarantaine automatique des comptes récents*\n" +
-                        "`!backup` • *Sauvegarde la structure des salons du serveur*\n" +
+                        "`!backup` • *Sauvegarde la structure actuelle des salons*\n" +
                         "`!report @membre [raison]` • *Signale un membre aux modérateurs*\n" +
                         "`!setlog #salon` • *Définit le salon de réception des alertes*\n" +
                         "`!serverinfo` • *Affiche les informations générales du serveur*"
                 }
             )
-            .setFooter({ text: "Écosystème n0mit CoreSystems • Protection Haute Disponibilité" })
+            .setFooter({ text: `Écosystème n0mit CoreSystems • Support : ${SUPPORT_SERVER_LINK}` })
             .setTimestamp();
 
         return message.reply({ embeds: [helpEmbed] });
@@ -556,12 +576,13 @@ client.on('messageCreate', async (message) => {
         const scoreEmbed = new EmbedBuilder()
             .setTitle(`📊 Audit de Sécurité : ${message.guild.name}`)
             .setColor(color)
-            .setDescription(`**Score de Sécurité : ${score}/100**\n\n` + (recommendations.length ? recommendations.join("\n") : "✅ Instance parfaitement sécurisée !"));
+            .setDescription(`**Score de Sécurité : ${score}/100**\n\n` + (recommendations.length ? recommendations.join("\n") : "✅ Instance parfaitement sécurisée !"))
+            .setFooter({ text: `n0mit CoreSystems • ${SUPPORT_SERVER_LINK}` });
 
         return message.reply({ embeds: [scoreEmbed] });
     }
 
-    // SAUVEGARDE DU SERVEUR
+    // SAUVEGARDE DU SERVEUR (Enregistrement de la structure des salons)
     if (command === 'backup') {
         if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) return message.reply("❌ Réservé aux administrateurs.");
 
@@ -571,7 +592,7 @@ client.on('messageCreate', async (message) => {
         const backupEmbed = new EmbedBuilder()
             .setTitle("📦 Sauvegarde Effectuée")
             .setColor(0x57F287)
-            .setDescription(`La structure actuelle de **${channelsData.length} salons** a été sauvegardée avec succès.`);
+            .setDescription(`La structure actuelle de **${channelsData.length} salons** a été enregistrée en mémoire.`);
 
         return message.reply({ embeds: [backupEmbed] });
     }
@@ -780,7 +801,7 @@ client.on('messageCreate', async (message) => {
     }
 
     if (command === 'serverinfo') {
-        return message.reply(`📊 **${message.guild.name}**\n• Propriétaire : <@${message.guild.ownerId}>\n• Membres : \`${message.guild.memberCount}\`\n• Créé le : \`${message.guild.createdAt.toLocaleDateString()}\``);
+        return message.reply(`📊 **${message.guild.name}**\n• Propriétaire : <@${message.guild.ownerId}>\n• Membres : \`${message.guild.memberCount}\`\n• Créé le : \`${message.guild.createdAt.toLocaleDateString()}\`\n• Écosystème : n0mit CoreSystems`);
     }
 });
 
