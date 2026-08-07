@@ -818,4 +818,8 @@ client.on('messageCreate', async (message) => {
     }
 });
 
-client.login(TOKEN);
+console.log("🔄 Tentative d'initialisation de la session Discord...");
+
+client.login(TOKEN).catch(error => {
+    console.error("❌ ERREUR CRITIQUE AU LOGIN DISCORD :", error);
+});
