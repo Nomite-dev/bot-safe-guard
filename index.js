@@ -84,6 +84,19 @@ const staffActionTracker = new Map();
 const spamTracker = new Map();
 const serverBackups = new Map(); // Stockage mémoire des sauvegardes
 
+client.on('shardError', error => {
+    console.error('❌ Erreur de connexion WebSocket (Shard) :', error);
+});
+
+client.on('shardDisconnect', (event, id) => {
+    console.warn(`⚠️ Bot déconnecté de Discord (Shard ${id}). Reconnexion...`);
+});
+
+client.on('shardReconnecting', id => {
+    console.log(`🔄 Tentative de reconnexion à Discord (Shard ${id})...`);
+});
+
+
 function isBotDev(userId) {
     return userId === OWNER_ID || devStaff.has(userId);
 }
