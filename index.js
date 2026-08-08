@@ -3,6 +3,9 @@
 // Écosystème n0mit CoreSystems
 // ============================================================================
 
+console.log("=== SAUVEGARDE DB ===", JSON.stringify(require('./database.json')));
+
+
 const { 
     Client, 
     GatewayIntentBits, 
